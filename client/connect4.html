@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connect 4 Multiplayer</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="connect4.css">
+</head>
+<body>
+    <div class="container connect4-container">
+        <h1>🔴 Connect 4 🟡</h1>
+        
+        <div id="matchmaking" class="matchmaking">
+            <button id="findMatchBtn" class="btn-primary">Find Match</button>
+        </div>
+
+        <div id="gameContainer" class="game-container hidden">
+            <div class="game-info">
+                <div id="status" class="status"></div>
+            </div>
+            
+            <div id="board" class="board connect4-board"></div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="connect4.js"></script>
+</body>
+</html>
+

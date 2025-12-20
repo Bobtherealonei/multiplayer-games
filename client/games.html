@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Games</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        .game-selection {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            margin-top: 30px;
+        }
+        
+        .game-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 15px;
+            text-decoration: none;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .game-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .game-card h2 {
+            margin: 0 0 10px 0;
+            font-size: 1.8em;
+        }
+        
+        .game-card p {
+            margin: 0;
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Multiplayer Games</h1>
+        <p style="margin-bottom: 20px; color: #666;">Choose a game to play</p>
+        
+        <div class="game-selection">
+            <a href="index.html" class="game-card">
+                <h2>Tic-Tac-Toe</h2>
+                <p>Classic 3x3 grid game. Get three in a row to win!</p>
+            </a>
+            
+            <a href="connect4.html" class="game-card">
+                <h2>Connect 4</h2>
+                <p>Drop your pieces and connect four in a row to win!</p>
+            </a>
+        </div>
+    </div>
+</body>
+</html>
+

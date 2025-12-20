@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tic-Tac-Toe Multiplayer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Tic-Tac-Toe Multiplayer</h1>
+        
+        <div id="status" class="status"></div>
+        
+        <div id="matchmaking" class="matchmaking">
+            <button id="findMatchBtn" class="btn-primary">Find Match</button>
+        </div>
+
+        <div id="gameContainer" class="game-container hidden">
+            <div class="game-info">
+                <div id="playerInfo" class="player-info"></div>
+                <div id="turnInfo" class="turn-info"></div>
+            </div>
+            
+            <div id="board" class="board"></div>
+            
+            <div id="gameResult" class="game-result"></div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="ticTacToe.js"></script>
+</body>
+</html>
+

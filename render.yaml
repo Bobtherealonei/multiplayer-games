@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: multiplayer-games
+    env: node
+    buildCommand: cd server && npm install
+    startCommand: cd server && node index.js
+    plan: free  # or 'starter' for always-on
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # PORT is automatically set by Render, no need to specify
+
