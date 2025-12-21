@@ -34,7 +34,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('makeMove', (data) => {
-    gameManager.handleMove(socket.id, data);
+    console.log('Received makeMove from', socket.id, 'data:', JSON.stringify(data));
+    // Handle case where data might be wrapped in an array
+    const moveData = Array.isArray(data) ? data[0] : data;
+    gameManager.handleMove(socket.id, moveData);
   });
 
   socket.on('disconnect', () => {
