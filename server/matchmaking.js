@@ -4,7 +4,7 @@ class Matchmaking {
     this.queues = new Map(); // gameType -> [players]
   }
 
-  addPlayer(socket, gameType) {
+  addPlayer(socket, gameType, userId) {
     // Validate gameType
     if (!gameType) {
       socket.emit('matchmakingStatus', { status: 'error', error: 'gameType is required' });
@@ -18,20 +18,20 @@ class Matchmaking {
 
     const queue = this.queues.get(gameType);
 
-    // Check if player is already in queue for this gameType
-    if (queue.find(p => p.id === socket.id)) {
+    // Check if player is already in queue for this gameType (using userId)
+    if (queue.find(p => p.id === userId)) {
       socket.emit('matchmakingStatus', { status: 'alreadyInQueue' });
       return;
     }
 
-    // Check if player is already in a game
-    if (this.gameManager.isPlayerInGame(socket.id)) {
+    // Check if player is already in a game (using userId)
+    if (this.gameManager.isPlayerInGame(userId)) {
       socket.emit('matchmakingStatus', { status: 'alreadyInGame' });
       return;
     }
 
     const player = {
-      id: socket.id,
+      id: userId, // Use Firebase user ID instead of socket.id
       socket: socket,
       gameType: gameType,
       joinedAt: Date.now()
@@ -44,10 +44,10 @@ class Matchmaking {
     this.tryMatchmaking(gameType);
   }
 
-  removePlayer(playerId) {
-    // Remove player from all queues
+  removePlayer(userId) {
+    // Remove player from all queues using userId
     for (const [gameType, queue] of this.queues.entries()) {
-      const index = queue.findIndex(p => p.id === playerId);
+      const index = queue.findIndex(p => p.id === userId);
       if (index !== -1) {
         queue.splice(index, 1);
         break;

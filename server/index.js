@@ -25,25 +25,45 @@ app.get('/', (req, res) => {
 // Serve static files from client directory
 app.use(express.static('../client', { index: false }));
 
+// Store user ID mapping: socket.id -> userId
+const socketToUserId = new Map();
+const userIdToSocket = new Map();
+
 io.on('connection', (socket) => {
-  console.log(`Player connected: ${socket.id}`);
+  // Get user ID from connection query params (sent via connectParams in iOS)
+  // Falls back to socket.id for web clients that don't send userId
+  const userId = socket.handshake.query?.userId || 
+                 socket.handshake.auth?.userId || 
+                 socket.id;
+  
+  // Store mapping
+  socketToUserId.set(socket.id, userId);
+  userIdToSocket.set(userId, socket);
+  
+  // Store userId on socket for easy access
+  socket.userId = userId;
+  
+  console.log(`Player connected: socket.id=${socket.id}, userId=${userId}`);
 
   socket.on('findMatch', (data) => {
     const gameType = data?.gameType || 'ticTacToe'; // Default to ticTacToe for backward compatibility
-    matchmaking.addPlayer(socket, gameType);
+    matchmaking.addPlayer(socket, gameType, userId);
   });
 
   socket.on('makeMove', (data) => {
-    console.log('Received makeMove from', socket.id, 'data:', JSON.stringify(data));
+    console.log('Received makeMove from', userId, '(socket:', socket.id, ') data:', JSON.stringify(data));
     // Handle case where data might be wrapped in an array
     const moveData = Array.isArray(data) ? data[0] : data;
-    gameManager.handleMove(socket.id, moveData);
+    gameManager.handleMove(userId, moveData);
   });
 
   socket.on('disconnect', () => {
-    console.log(`Player disconnected: ${socket.id}`);
-    matchmaking.removePlayer(socket.id);
-    gameManager.handleDisconnect(socket.id);
+    console.log(`Player disconnected: userId=${userId}, socket.id=${socket.id}`);
+    matchmaking.removePlayer(userId);
+    gameManager.handleDisconnect(userId);
+    // Clean up mappings
+    socketToUserId.delete(socket.id);
+    userIdToSocket.delete(userId);
   });
 });
 
