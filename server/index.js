@@ -57,6 +57,12 @@ io.on('connection', (socket) => {
     gameManager.handleMove(userId, moveData);
   });
 
+  // ✅ Chat relay
+  socket.on('chatMessage', (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    gameManager.handleChat(userId, payload);
+  });
+
   socket.on('disconnect', () => {
     console.log(`Player disconnected: userId=${userId}, socket.id=${socket.id}`);
     matchmaking.removePlayer(userId);
@@ -71,4 +77,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
-
