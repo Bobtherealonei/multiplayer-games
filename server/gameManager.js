@@ -118,6 +118,29 @@ class GameManager {
     }
   }
 
+  // ✅ Chat relay
+  handleChat(playerId, payload) {
+    const gameId = payload?.gameId || this.playerToGame.get(playerId);
+    if (!gameId) return;
+
+    const gameData = this.games.get(gameId);
+    if (!gameData) return;
+
+    const sender = gameData.player1.id === playerId ? gameData.player1 : gameData.player2;
+    const receiver = gameData.player1.id === playerId ? gameData.player2 : gameData.player1;
+
+    const messagePayload = {
+      message: payload?.message,
+      sender: payload?.sender,
+      symbol: payload?.symbol,
+      gameId: gameId,
+      playerId: playerId
+    };
+
+    sender.socket.emit('chatMessage', messagePayload);
+    receiver.socket.emit('chatMessage', messagePayload);
+  }
+
   sendGameState(gameId) {
     const gameData = this.games.get(gameId);
     if (!gameData) {
@@ -185,4 +208,3 @@ class GameManager {
 }
 
 module.exports = GameManager;
-
