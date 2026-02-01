@@ -118,7 +118,7 @@ class GameManager {
     }
   }
 
-  // ✅ Chat relay
+  // ✅ Chat relay (send only to receiver)
   handleChat(playerId, payload) {
     const gameId = payload?.gameId || this.playerToGame.get(playerId);
     if (!gameId) return;
@@ -126,7 +126,6 @@ class GameManager {
     const gameData = this.games.get(gameId);
     if (!gameData) return;
 
-    const sender = gameData.player1.id === playerId ? gameData.player1 : gameData.player2;
     const receiver = gameData.player1.id === playerId ? gameData.player2 : gameData.player1;
 
     const messagePayload = {
@@ -137,7 +136,6 @@ class GameManager {
       playerId: playerId
     };
 
-    sender.socket.emit('chatMessage', messagePayload);
     receiver.socket.emit('chatMessage', messagePayload);
   }
 
