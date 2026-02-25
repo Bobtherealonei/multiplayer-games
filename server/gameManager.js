@@ -2,6 +2,7 @@ const TicTacToe = require('./ticTacToe');
 const Connect4 = require('./connect4');
 const RockPaperScissors = require('./rockPaperScissors');
 const FirstTo10 = require('./firstTo10');
+const Mines = require('./mines');
 
 class GameManager {
   constructor(io) {
@@ -13,6 +14,7 @@ class GameManager {
     this.registerGameType('connect4', Connect4);
     this.registerGameType('rockPaperScissors', RockPaperScissors);
     this.registerGameType('firstTo10', FirstTo10);
+    this.registerGameType('mines', Mines);
   }
 
   /**
