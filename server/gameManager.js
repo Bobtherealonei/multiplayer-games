@@ -3,6 +3,7 @@ const Connect4 = require('./connect4');
 const RockPaperScissors = require('./rockPaperScissors');
 const FirstTo10 = require('./firstTo10');
 const Mines = require('./mines');
+const TwoTruthsAndALie = require('./twoTruthsAndALie');
 
 class GameManager {
   constructor(io) {
@@ -11,6 +12,7 @@ class GameManager {
     this.playerToGame = new Map();
     this.gameFactories = new Map();
     this.registerGameType('ticTacToe', TicTacToe);
+    this.registerGameType('twoTruthsAndALie', TwoTruthsAndALie);
     this.registerGameType('connect4', Connect4);
     this.registerGameType('rockPaperScissors', RockPaperScissors);
     this.registerGameType('firstTo10', FirstTo10);
