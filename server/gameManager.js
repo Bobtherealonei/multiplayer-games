@@ -1,5 +1,5 @@
 const TicTacToe = require('./ticTacToe');
-const Battleship = require('./battleship');
+const Blackjack = require('./blackjack');
 const RockPaperScissors = require('./rockPaperScissors');
 const FirstTo10 = require('./firstTo10');
 const Mines = require('./mines');
@@ -13,7 +13,7 @@ class GameManager {
     this.gameFactories = new Map();
     this.registerGameType('ticTacToe', TicTacToe);
     this.registerGameType('twoTruthsAndALie', TwoTruthsAndALie);
-    this.registerGameType('battleship', Battleship);
+    this.registerGameType('blackjack', Blackjack);
     this.registerGameType('rockPaperScissors', RockPaperScissors);
     this.registerGameType('firstTo10', FirstTo10);
     this.registerGameType('mines', Mines);
