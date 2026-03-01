@@ -1,5 +1,5 @@
 const TicTacToe = require('./ticTacToe');
-const Connect4 = require('./connect4');
+const Battleship = require('./battleship');
 const RockPaperScissors = require('./rockPaperScissors');
 const FirstTo10 = require('./firstTo10');
 const Mines = require('./mines');
@@ -13,7 +13,7 @@ class GameManager {
     this.gameFactories = new Map();
     this.registerGameType('ticTacToe', TicTacToe);
     this.registerGameType('twoTruthsAndALie', TwoTruthsAndALie);
-    this.registerGameType('connect4', Connect4);
+    this.registerGameType('battleship', Battleship);
     this.registerGameType('rockPaperScissors', RockPaperScissors);
     this.registerGameType('firstTo10', FirstTo10);
     this.registerGameType('mines', Mines);
@@ -161,10 +161,10 @@ class GameManager {
       isDraw: state.isDraw,
       player1Symbol: gameData.player1.symbol,
       player2Symbol: gameData.player2.symbol,
-      // Include game-specific properties
       rows: state.rows,
       cols: state.cols,
-      gameType: gameData.game.gameType
+      gameType: gameData.game.gameType,
+      ...state
     };
 
     // Send to both players
