@@ -1,7 +1,7 @@
 const TicTacToe = require('./ticTacToe');
 const Battleship = require('./battleship');
 const RockPaperScissors = require('./rockPaperScissors');
-const FirstTo10 = require('./firstTo10');
+const Briefcase = require('./briefcase');
 const Mines = require('./mines');
 const TwoTruthsAndALie = require('./twoTruthsAndALie');
 
@@ -15,7 +15,7 @@ class GameManager {
     this.registerGameType('twoTruthsAndALie', TwoTruthsAndALie);
     this.registerGameType('battleship', Battleship);
     this.registerGameType('rockPaperScissors', RockPaperScissors);
-    this.registerGameType('firstTo10', FirstTo10);
+    this.registerGameType('briefcase', Briefcase);
     this.registerGameType('mines', Mines);
   }
 
