@@ -18,18 +18,57 @@ const POCKETS = [
   [TABLE_WIDTH, TABLE_HEIGHT]
 ];
 
+function poolBallColor(id) {
+  const colors = {
+    '1': '#f7d046',
+    '2': '#3d7cff',
+    '3': '#e54a4a',
+    '4': '#7b58d6',
+    '5': '#ff8a2a',
+    '6': '#1b8f4a',
+    '7': '#7a1730',
+    '8': '#141414',
+    '9': '#f7d046',
+    '10': '#3d7cff',
+    '11': '#e54a4a',
+    '12': '#7b58d6',
+    '13': '#ff8a2a',
+    '14': '#1b8f4a',
+    '15': '#7a1730'
+  };
+  return colors[id] || '#ffffff';
+}
+
 function createRack() {
-  const startX = TABLE_WIDTH * 0.72;
+  const pointX = TABLE_WIDTH * 0.68;
   const centerY = TABLE_HEIGHT / 2;
-  const gap = BALL_RADIUS * 2.15;
-  return [
-    { id: 'cue', x: TABLE_WIDTH * 0.24, y: centerY, vx: 0, vy: 0, color: '#f5f5f5', pocketed: false, kind: 'cue' },
-    { id: '1', x: startX, y: centerY, vx: 0, vy: 0, color: '#f7d046', pocketed: false, kind: 'object' },
-    { id: '2', x: startX + gap, y: centerY - BALL_RADIUS, vx: 0, vy: 0, color: '#4aa7ff', pocketed: false, kind: 'object' },
-    { id: '3', x: startX + gap, y: centerY + BALL_RADIUS, vx: 0, vy: 0, color: '#ff5d73', pocketed: false, kind: 'object' },
-    { id: '4', x: startX + gap * 2, y: centerY - gap / 1.8, vx: 0, vy: 0, color: '#7d5cff', pocketed: false, kind: 'object' },
-    { id: '5', x: startX + gap * 2, y: centerY + gap / 1.8, vx: 0, vy: 0, color: '#ff9340', pocketed: false, kind: 'object' }
+  const xStep = Math.sqrt(3) * BALL_RADIUS * 1.03;
+  const yStep = BALL_RADIUS * 1.03;
+  const order = ['1', '9', '2', '10', '8', '3', '11', '4', '12', '5', '13', '6', '14', '7', '15'];
+  const balls = [
+    { id: 'cue', x: TABLE_WIDTH * 0.24, y: centerY, vx: 0, vy: 0, color: '#f5f5f5', pocketed: false, kind: 'cue' }
   ];
+
+  let idx = 0;
+  for (let row = 0; row < 5; row += 1) {
+    const x = pointX + row * xStep;
+    const startY = centerY - row * yStep;
+    for (let col = 0; col <= row; col += 1) {
+      const id = order[idx++];
+      balls.push({
+        id,
+        x,
+        y: startY + col * yStep * 2,
+        vx: 0,
+        vy: 0,
+        color: poolBallColor(id),
+        pocketed: false,
+        kind: 'object'
+      });
+    }
+  }
+
+  return balls;
 }
 
 function cloneBall(ball) {
