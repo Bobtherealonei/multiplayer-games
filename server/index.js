@@ -59,6 +59,22 @@ io.on('connection', (socket) => {
     gameManager.handleChat(userId, payload);
   });
 
+  socket.on('leaveGame', (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    matchmaking.removePlayer(userId);
+    gameManager.handleLeave(userId, payload);
+  });
+
+  socket.on('rematchAccept', (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    gameManager.handleRematchAccept(userId, payload);
+  });
+
+  socket.on('rematchSkip', (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    gameManager.handleRematchSkip(userId, payload);
+  });
+
   socket.on('disconnect', () => {
     console.log(`Player disconnected: userId=${userId}, socket.id=${socket.id}`);
     matchmaking.removePlayer(userId);
