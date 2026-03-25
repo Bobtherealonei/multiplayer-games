@@ -1,10 +1,6 @@
 const TicTacToe = require('./ticTacToe');
-const Battleship = require('./battleship');
+const DebateTopic = require('./debateTopic');
 const RockPaperScissors = require('./rockPaperScissors');
-const BalloonPump = require('./balloonPump');
-const Mines = require('./mines');
-const TwoTruthsAndALie = require('./twoTruthsAndALie');
-const Pool = require('./pool');
 
 class GameManager {
   constructor(io) {
@@ -13,12 +9,12 @@ class GameManager {
     this.playerToGame = new Map();
     this.gameFactories = new Map();
     this.registerGameType('ticTacToe', TicTacToe);
-    this.registerGameType('twoTruthsAndALie', TwoTruthsAndALie);
-    this.registerGameType('battleship', Battleship);
+    this.registerGameType('twoTruthsAndALie', DebateTopic);
+    this.registerGameType('battleship', DebateTopic);
     this.registerGameType('rockPaperScissors', RockPaperScissors);
-    this.registerGameType('balloonPump', BalloonPump);
-    this.registerGameType('mines', Mines);
-    this.registerGameType('pool', Pool);
+    this.registerGameType('balloonPump', DebateTopic);
+    this.registerGameType('mines', DebateTopic);
+    this.registerGameType('pool', DebateTopic);
   }
 
   /**
