@@ -1,21 +1,30 @@
 const TicTacToe = require('./ticTacToe');
-const DebateTopic = require('./debateTopic');
+const Battleship = require('./battleship');
 const RockPaperScissors = require('./rockPaperScissors');
+const BalloonPump = require('./balloonPump');
+const Mines = require('./mines');
+const TwoTruthsAndALie = require('./twoTruthsAndALie');
+const Pool = require('./pool');
+const TopicDebate = require('./topicDebate');
 
 class GameManager {
   constructor(io) {
     this.io = io;
     this.games = new Map();
     this.playerToGame = new Map();
-    this.rematchAccepts = new Map();
     this.gameFactories = new Map();
     this.registerGameType('ticTacToe', TicTacToe);
-    this.registerGameType('twoTruthsAndALie', DebateTopic);
-    this.registerGameType('battleship', DebateTopic);
+    this.registerGameType('twoTruthsAndALie', TwoTruthsAndALie);
+    this.registerGameType('battleship', Battleship);
     this.registerGameType('rockPaperScissors', RockPaperScissors);
-    this.registerGameType('balloonPump', DebateTopic);
-    this.registerGameType('mines', DebateTopic);
-    this.registerGameType('pool', DebateTopic);
+    this.registerGameType('balloonPump', BalloonPump);
+    this.registerGameType('mines', Mines);
+    this.registerGameType('pool', Pool);
+    this.registerGameType('religion', TopicDebate);
+    this.registerGameType('aiFuture', TopicDebate);
+    this.registerGameType('currentPolitics', TopicDebate);
+    this.registerGameType('collegeCareers', TopicDebate);
+    this.registerGameType('sportsDebate', TopicDebate);
   }
 
   /**
@@ -146,68 +155,6 @@ class GameManager {
     receiver.socket.emit('chatMessage', messagePayload);
   }
 
-  handleLeave(playerId, payload) {
-    const gameId = payload?.gameId || this.playerToGame.get(playerId);
-    if (!gameId) return;
-
-    const gameData = this.games.get(gameId);
-    if (!gameData) return;
-
-    const otherPlayer = gameData.player1.id === playerId ? gameData.player2 : gameData.player1;
-    if (otherPlayer?.socket) {
-      otherPlayer.socket.emit('playerLeft');
-    }
-
-    this.endGame(gameId);
-  }
-
-  handleRematchAccept(playerId, payload) {
-    const gameId = payload?.gameId || this.playerToGame.get(playerId);
-    if (!gameId) return;
-
-    const gameData = this.games.get(gameId);
-    if (!gameData) return;
-
-    if (!this.rematchAccepts.has(gameId)) {
-      this.rematchAccepts.set(gameId, new Set());
-    }
-
-    const accepts = this.rematchAccepts.get(gameId);
-    accepts.add(playerId);
-
-    if (accepts.size < 2) {
-      return;
-    }
-
-    const chatId = `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    gameData.player1.socket.emit('rematchReady', {
-      chatId,
-      opponent: gameData.player2.id,
-      opponentUid: gameData.player2.id
-    });
-    gameData.player2.socket.emit('rematchReady', {
-      chatId,
-      opponent: gameData.player1.id,
-      opponentUid: gameData.player1.id
-    });
-
-    this.endGame(gameId);
-  }
-
-  handleRematchSkip(playerId, payload) {
-    const gameId = payload?.gameId || this.playerToGame.get(playerId);
-    if (!gameId) return;
-
-    const gameData = this.games.get(gameId);
-    if (!gameData) return;
-
-    gameData.player1.socket.emit('leaveGame');
-    gameData.player2.socket.emit('leaveGame');
-
-    this.endGame(gameId);
-  }
-
   sendGameState(gameId) {
     const gameData = this.games.get(gameId);
     if (!gameData) {
@@ -248,7 +195,6 @@ class GameManager {
       
       this.playerToGame.delete(gameData.player1.id);
       this.playerToGame.delete(gameData.player2.id);
-      this.rematchAccepts.delete(gameId);
       this.games.delete(gameId);
       console.log(`Game ended: ${gameId}`);
     }

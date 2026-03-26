@@ -1,8 +1,7 @@
 const Game = require('./game');
 
 const TOPICS = {
-  twoTruthsAndALie: {
-    key: 'religion',
+  religion: {
     title: 'Religion',
     questions: [
       'Should religion play a role in government decisions?',
@@ -17,8 +16,7 @@ const TOPICS = {
       'Do religious values make society stronger?'
     ]
   },
-  battleship: {
-    key: 'aiFuture',
+  aiFuture: {
     title: 'AI and the Future',
     questions: [
       'Will AI create more jobs than it destroys?',
@@ -33,8 +31,7 @@ const TOPICS = {
       'Is society moving too fast with AI?'
     ]
   },
-  mines: {
-    key: 'currentPolitics',
+  currentPolitics: {
     title: 'Current Politics',
     questions: [
       'Is Trump a good president?',
@@ -49,8 +46,7 @@ const TOPICS = {
       'Is the country headed in the right direction politically?'
     ]
   },
-  balloonPump: {
-    key: 'collegeCareers',
+  collegeCareers: {
     title: 'College and Careers',
     questions: [
       'Is college worth the cost?',
@@ -65,8 +61,7 @@ const TOPICS = {
       'Is starting your own business better than working for someone else?'
     ]
   },
-  pool: {
-    key: 'sports',
+  sportsDebate: {
     title: 'Sports',
     questions: [
       'Is LeBron better than Jordan?',
@@ -84,40 +79,42 @@ const TOPICS = {
 };
 
 function randomQuestion(gameType) {
-  const topic = TOPICS[gameType] || TOPICS.twoTruthsAndALie;
-  const questions = topic.questions;
-  return topic.questions[Math.floor(Math.random() * questions.length)];
+  const topic = TOPICS[gameType] || TOPICS.religion;
+  const index = Math.floor(Math.random() * topic.questions.length);
+  return {
+    topicKey: gameType,
+    topicTitle: topic.title,
+    question: topic.questions[index]
+  };
 }
 
-class DebateTopic extends Game {
+class TopicDebate extends Game {
   constructor() {
     super();
     this.playerSymbols = new Map();
     this.phase = 'debating';
+    this.topicKey = 'religion';
+    this.topicTitle = 'Religion';
     this.question = '';
-    this.topicKey = '';
-    this.topicTitle = '';
-    this.readyToMatch = { P1: false, P2: false };
-    this.isDraw = false;
+    this.matchRequests = { P1: false, P2: false };
     this.winner = null;
-    this.currentPlayer = '';
+    this.isDraw = false;
   }
 
   createGame(players) {
     if (players.length !== 2) {
-      throw new Error('DebateTopic requires exactly 2 players');
+      throw new Error('TopicDebate requires exactly 2 players');
     }
 
     this.players = players;
     this.playerSymbols.set(players[0].id, 'P1');
     this.playerSymbols.set(players[1].id, 'P2');
-    const topic = TOPICS[this.gameType] || TOPICS.twoTruthsAndALie;
-    this.topicKey = topic.key;
-    this.topicTitle = topic.title;
-    this.question = randomQuestion(this.gameType);
     this.phase = 'debating';
-    this.readyToMatch = { P1: false, P2: false };
-    this.currentPlayer = '';
+    const selected = randomQuestion(this.gameType);
+    this.topicKey = selected.topicKey;
+    this.topicTitle = selected.topicTitle;
+    this.question = selected.question;
+    this.matchRequests = { P1: false, P2: false };
     this.winner = null;
     this.isDraw = false;
     this.createdAt = Date.now();
@@ -132,33 +129,35 @@ class DebateTopic extends Game {
   makeMove(playerId, move) {
     const playerSymbol = this.playerSymbols.get(playerId);
     if (!playerSymbol) {
-      return { success: false, error: 'Player not in this game' };
+      return { success: false, error: 'Player not in this debate' };
     }
 
-    if (move && Object.prototype.hasOwnProperty.call(move, 'readyToMatch')) {
-      const ready = Boolean(move.readyToMatch);
-      this.readyToMatch[playerSymbol] = ready;
-      this.phase = this.readyToMatch.P1 && this.readyToMatch.P2 ? 'matching' : 'debating';
+    if (move && typeof move.readyToMatch === 'boolean') {
+      this.matchRequests[playerSymbol] = move.readyToMatch;
+      if (this.matchRequests.P1 && this.matchRequests.P2) {
+        this.phase = 'matched';
+      } else {
+        this.phase = 'debating';
+      }
       return { success: true };
     }
 
-    return { success: false, error: 'Invalid move' };
+    return { success: false, error: 'Invalid debate action' };
   }
 
   getState() {
     return {
-      board: [[this.phase, this.topicTitle, this.question]],
-      currentPlayer: this.currentPlayer,
+      board: [[this.question]],
+      currentPlayer: '',
       winner: this.winner,
       isDraw: this.isDraw,
       rows: 1,
-      cols: 3,
+      cols: 1,
       phase: this.phase,
       topicKey: this.topicKey,
       topicTitle: this.topicTitle,
       question: this.question,
-      readyP1: this.readyToMatch.P1,
-      readyP2: this.readyToMatch.P2
+      matchRequests: { ...this.matchRequests }
     };
   }
 
@@ -171,13 +170,10 @@ class DebateTopic extends Game {
     this.playerSymbols.clear();
     this.phase = 'debating';
     this.question = '';
-    this.topicKey = '';
-    this.topicTitle = '';
-    this.readyToMatch = { P1: false, P2: false };
-    this.currentPlayer = '';
+    this.matchRequests = { P1: false, P2: false };
     this.winner = null;
     this.isDraw = false;
   }
 }
 
-module.exports = DebateTopic;
+module.exports = TopicDebate;
