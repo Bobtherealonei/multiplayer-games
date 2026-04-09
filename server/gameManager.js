@@ -200,6 +200,23 @@ class GameManager {
     }
   }
 
+  handleLeaveGame(playerId, message = 'Player has disconnected') {
+    const gameId = this.playerToGame.get(playerId);
+    if (!gameId) {
+      return;
+    }
+
+    const gameData = this.games.get(gameId);
+    if (!gameData) {
+      return;
+    }
+
+    const payload = { message };
+    gameData.player1.socket.emit('playerLeft', payload);
+    gameData.player2.socket.emit('playerLeft', payload);
+    this.endGame(gameId);
+  }
+
   handleDisconnect(playerId) {
     const gameId = this.playerToGame.get(playerId);
     if (gameId) {
@@ -210,7 +227,7 @@ class GameManager {
           ? gameData.player2 
           : gameData.player1;
         
-        otherPlayer.socket.emit('opponentDisconnected');
+        otherPlayer.socket.emit('opponentDisconnected', { message: 'Player has disconnected' });
         this.endGame(gameId);
       }
     }
