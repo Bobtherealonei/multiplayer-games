@@ -11,18 +11,9 @@ class Matchmaking {
       return;
     }
 
-    // Initialize queue for gameType if it doesn't exist
-    if (!this.queues.has(gameType)) {
-      this.queues.set(gameType, []);
-    }
-
-    const queue = this.queues.get(gameType);
-
-    // Check if player is already in queue for this gameType (using userId)
-    if (queue.find(p => p.id === userId)) {
-      socket.emit('matchmakingStatus', { status: 'alreadyInQueue' });
-      return;
-    }
+    // If the player got stuck in any queue from an older search or reconnect,
+    // drop the stale entry and enqueue the current socket fresh.
+    this.removePlayer(userId);
 
     // Check if player is already in a game (using userId)
     if (this.gameManager.isPlayerInGame(userId)) {
@@ -30,6 +21,12 @@ class Matchmaking {
       return;
     }
 
+    // Initialize queue for gameType if it doesn't exist
+    if (!this.queues.has(gameType)) {
+      this.queues.set(gameType, []);
+    }
+
+    const queue = this.queues.get(gameType);
     const player = {
       id: userId, // Use Firebase user ID instead of socket.id
       socket: socket,

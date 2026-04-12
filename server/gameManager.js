@@ -211,7 +211,7 @@ class GameManager {
       return;
     }
 
-    const payload = { message };
+    const payload = { message, gameId };
     gameData.player1.socket.emit('playerLeft', payload);
     gameData.player2.socket.emit('playerLeft', payload);
     this.endGame(gameId);
@@ -227,7 +227,7 @@ class GameManager {
           ? gameData.player2 
           : gameData.player1;
         
-        otherPlayer.socket.emit('opponentDisconnected', { message: 'Player has disconnected' });
+        otherPlayer.socket.emit('opponentDisconnected', { message: 'Player has disconnected', gameId });
         this.endGame(gameId);
       }
     }
