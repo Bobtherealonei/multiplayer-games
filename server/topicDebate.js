@@ -1,20 +1,31 @@
+const https = require('https');
 const Game = require('./game');
+
+const TRENDING_USA_TITLE = 'Trending in the USA';
+const TRENDING_USA_RSS = 'https://trends.google.com/trending/rss?geo=US';
+const DAILY_REFRESH_MS = 24 * 60 * 60 * 1000;
+const MAX_TREND_QUESTIONS = 12;
+
+const TREND_QUESTION_TEMPLATES = [
+  (trend) => `Is "${trend}" worth all the attention it is getting in the USA right now?`,
+  (trend) => `Is the public reaction to "${trend}" justified?`,
+  (trend) => `Will "${trend}" still matter a week from now, or is it just a moment?`,
+  (trend) => `Is social media helping people understand "${trend}", or just making it louder?`,
+  (trend) => `Is "${trend}" mostly meaningful news or mostly online hype?`
+];
+
+const FALLBACK_TRENDING_QUESTIONS = [
+  'Is this trend worth all the attention it is getting in the USA right now?',
+  'Is the public reaction to this trend justified?',
+  'Will this trend still matter a week from now, or is it just a moment?',
+  'Is social media helping people understand this trend, or just making it louder?',
+  'Is this trend mostly meaningful news or mostly online hype?'
+];
 
 const TOPICS = {
   religion: {
-    title: 'Religion',
-    questions: [
-      'Should religion play a role in government decisions?',
-      'Is religion still as important today as it was in the past?',
-      'Can you be a good person without religion?',
-      'Should prayer be allowed in public schools?',
-      'Does religion bring people together more than it divides them?',
-      'Should parents raise their kids in one religion from birth?',
-      'Is organized religion more helpful than harmful?',
-      'Should religious beliefs ever excuse someone from following certain laws?',
-      'Can science and religion fully coexist?',
-      'Do religious values make society stronger?'
-    ]
+    title: TRENDING_USA_TITLE,
+    getQuestions: () => getTrendingUSAQuestions()
   },
   aiFuture: {
     title: 'AI and the Future',
@@ -78,13 +89,113 @@ const TOPICS = {
   }
 };
 
+const trendingCache = {
+  title: TRENDING_USA_TITLE,
+  questions: FALLBACK_TRENDING_QUESTIONS,
+  updatedAt: 0,
+  refreshInFlight: null
+};
+
+function decodeXmlEntities(text) {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function extractTagContent(xml, tagName) {
+  const regex = new RegExp(`<${tagName}>([\s\S]*?)<\/${tagName}>`, 'g');
+  const values = [];
+  let match;
+  while ((match = regex.exec(xml)) !== null) {
+    values.push(decodeXmlEntities(match[1].trim()));
+  }
+  return values;
+}
+
+function fetchText(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (response) => {
+        if (response.statusCode && response.statusCode >= 400) {
+          reject(new Error(`Trend feed request failed with status ${response.statusCode}`));
+          response.resume();
+          return;
+        }
+
+        let raw = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => {
+          raw += chunk;
+        });
+        response.on('end', () => resolve(raw));
+      })
+      .on('error', reject);
+  });
+}
+
+function buildTrendQuestion(trend, index) {
+  const cleanTrend = trend.replace(/\s+/g, ' ').trim();
+  const template = TREND_QUESTION_TEMPLATES[index % TREND_QUESTION_TEMPLATES.length];
+  return template(cleanTrend);
+}
+
+async function refreshTrendingUSACache() {
+  if (trendingCache.refreshInFlight) {
+    return trendingCache.refreshInFlight;
+  }
+
+  trendingCache.refreshInFlight = (async () => {
+    try {
+      const xml = await fetchText(TRENDING_USA_RSS);
+      const itemBlocks = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+      const titles = itemBlocks
+        .map((item) => extractTagContent(item, 'title')[0])
+        .filter(Boolean)
+        .map((title) => title.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim());
+
+      const uniqueTitles = [...new Set(titles)].slice(0, MAX_TREND_QUESTIONS);
+      if (uniqueTitles.length > 0) {
+        trendingCache.questions = uniqueTitles.map((trend, index) => buildTrendQuestion(trend, index));
+        trendingCache.updatedAt = Date.now();
+      }
+    } catch (error) {
+      console.error('Trending USA refresh failed:', error.message);
+      if (!trendingCache.updatedAt) {
+        trendingCache.questions = FALLBACK_TRENDING_QUESTIONS;
+      }
+    } finally {
+      trendingCache.refreshInFlight = null;
+    }
+  })();
+
+  return trendingCache.refreshInFlight;
+}
+
+function ensureTrendingUSACache() {
+  const isStale = Date.now() - trendingCache.updatedAt > DAILY_REFRESH_MS;
+  const hasFallbackOnly = !Array.isArray(trendingCache.questions) || trendingCache.questions.length === 0;
+  if ((isStale || hasFallbackOnly) && !trendingCache.refreshInFlight) {
+    refreshTrendingUSACache();
+  }
+}
+
+function getTrendingUSAQuestions() {
+  ensureTrendingUSACache();
+  return trendingCache.questions.length ? trendingCache.questions : FALLBACK_TRENDING_QUESTIONS;
+}
+
 function randomQuestion(gameType) {
   const topic = TOPICS[gameType] || TOPICS.religion;
-  const index = Math.floor(Math.random() * topic.questions.length);
+  const questions = typeof topic.getQuestions === 'function' ? topic.getQuestions() : topic.questions;
+  const sourceQuestions = questions && questions.length ? questions : FALLBACK_TRENDING_QUESTIONS;
+  const index = Math.floor(Math.random() * sourceQuestions.length);
   return {
     topicKey: gameType,
     topicTitle: topic.title,
-    question: topic.questions[index]
+    question: sourceQuestions[index]
   };
 }
 
@@ -94,11 +205,12 @@ class TopicDebate extends Game {
     this.playerSymbols = new Map();
     this.phase = 'debating';
     this.topicKey = 'religion';
-    this.topicTitle = 'Religion';
+    this.topicTitle = TRENDING_USA_TITLE;
     this.question = '';
     this.matchRequests = { P1: false, P2: false };
     this.winner = null;
     this.isDraw = false;
+    ensureTrendingUSACache();
   }
 
   createGame(players) {
@@ -175,5 +287,7 @@ class TopicDebate extends Game {
     this.isDraw = false;
   }
 }
+
+ensureTrendingUSACache();
 
 module.exports = TopicDebate;
