@@ -3,97 +3,113 @@ const http = require('http');
 const Game = require('./game');
 
 const TRENDING_USA_TITLE = 'Trending in the USA';
-const REFRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
-const MAX_QUESTIONS = 10;
+const REFRESH_WINDOW_MS = 6 * 60 * 60 * 1000;  // refresh every 6 hours
+const MAX_QUESTIONS = 15;
 
-// Major mainstream news RSS feeds - these only ever carry hard news
+// Reliable mainstream news RSS feeds that always carry top global/US hard news
 const NEWS_FEEDS = [
-  'https://feeds.reuters.com/reuters/topNews',
-  'https://feeds.npr.org/1001/rss.xml',
-  'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml'
+  'https://feeds.bbci.co.uk/news/rss.xml',            // BBC Top Stories
+  'https://feeds.bbci.co.uk/news/world/rss.xml',      // BBC World
+  'https://feeds.npr.org/1001/rss.xml',               // NPR Top Stories
+  'https://www.aljazeera.com/xml/rss/all.xml',        // Al Jazeera English
+  'https://feeds.feedburner.com/time/topstories',     // TIME Top Stories
 ];
 
+// Fallback if all feeds fail
 const FALLBACK_QUESTIONS = [
   'Is the U.S. response to the current conflict in the Middle East the right move?',
-  'Is the government handling the biggest story in the news right now correctly?',
-  'Are the current U.S. foreign policy decisions making America stronger or weaker?',
-  "Is the media covering today's biggest story fairly?",
-  'Should the U.S. be more involved in what is happening internationally right now?'
+  'Are current U.S. foreign policy decisions making America stronger or weaker?',
+  "Is the media covering today's biggest stories fairly?",
+  'Should the U.S. be more involved in what is happening internationally right now?',
+  'Is the government handling the economy the right way?'
 ];
 
-// Only turn a headline into a question if it is clearly major news
-const HARD_NEWS_KEYWORDS = /(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|russia|military|ceasefire|shooting|killed|dead|crisis|hostage|evacuation|election|president|trump|biden|congress|senate|supreme court|government|policy|veto|impeach|inflation|tariff|economy|recession|federal reserve|interest rate|immigration|border|deportation|sanction|nuclear|nato|china|north korea)/i;
-
-// Block anything that is clearly entertainment or sports
-const SOFT_BLOCKLIST = /(season \\d|episode|finale|trailer|netflix|hbo|disney\+|movie|film|album|song|concert|celebrity|actor|actress|nhl|nba|nfl|mlb|fifa|ufc|wwe|gaming|playstation|xbox|nintendo|anime|manga|fashion|influencer)/i;
+// Drop only pure entertainment — NOT hard news keywords; the feeds themselves guarantee real news
+const SOFT_BLOCKLIST = /(episode \d|season \d|series \d|finale|trailer|review:|netflix|hbo max|disney\+|apple tv|paramount\+|box office|\balbum\b|song lyrics|concert tour|\bcelebrity\b|kardashian|taylor swift|beyonce|selena|ariana|billie eilish|nhl|nba draft|nfl draft|mlb trade|fifa world cup group|ufc \d|wwe|video game|playstation|xbox|nintendo switch|anime|manga|fashion week|influencer|tiktok trend|viral video)/i;
 
 const QUESTION_TEMPLATES = {
-  war: (topic) => `Is the U.S. response to what is happening with "${topic}" the right move?`,
-  politics: (topic) => `Is the government handling "${topic}" the right way?`,
-  economy: (topic) => `Does what is happening with "${topic}" mean the economy is headed in the wrong direction?`,
-  immigration: (topic) => `Is the U.S. approach to "${topic}" fair?`,
-  international: (topic) => `Should the U.S. be more or less involved in the situation around "${topic}"?`,
-  default: (topic) => `Is the public reaction to "${topic}" justified?`
+  war:       (t) => `Is the U.S. response to the situation involving "${t}" the right call?`,
+  politics:  (t) => `Is the government handling the situation around "${t}" correctly?`,
+  economy:   (t) => `Does what is happening with "${t}" signal that the economy is in trouble?`,
+  immigration:(t)=> `Is the U.S. approach to the situation around "${t}" fair?`,
+  intl:      (t) => `Should the U.S. be more or less involved in what is happening with "${t}"?`,
+  default:   (t) => `Is the public reaction to "${t}" justified or overblown?`
 };
 
-function questionForHeadline(headline) {
+function categoryForHeadline(headline) {
   const h = headline.toLowerCase();
-  if (/(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|russia|military|ceasefire|killed|hostage|nuclear|nato)/.test(h)) {
-    return QUESTION_TEMPLATES.war(headline);
-  }
-  if (/(immigration|border|deportation|migrant)/.test(h)) {
-    return QUESTION_TEMPLATES.immigration(headline);
-  }
-  if (/(economy|inflation|tariff|recession|interest rate|market|stocks|jobs|federal reserve)/.test(h)) {
-    return QUESTION_TEMPLATES.economy(headline);
-  }
-  if (/(election|president|trump|biden|congress|senate|supreme court|government|policy|veto|impeach)/.test(h)) {
-    return QUESTION_TEMPLATES.politics(headline);
-  }
-  if (/(china|north korea|sanction|nato|international|foreign)/.test(h)) {
-    return QUESTION_TEMPLATES.international(headline);
-  }
-  return QUESTION_TEMPLATES.default(headline);
+  if (/(war|attack|airstrike|missile|bomb|explosion|conflict|iran|israel|gaza|ukraine|russia|military|ceasefire|killed|hostage|nuclear|nato|troops|soldier|invasion)/.test(h)) return 'war';
+  if (/(immigration|border|migrant|deportation|asylum)/.test(h)) return 'immigration';
+  if (/(economy|inflation|tariff|recession|interest rate|stock|market|federal reserve|jobs report|gdp|trade war|debt|budget|tax)/.test(h)) return 'economy';
+  if (/(election|president|trump|biden|harris|congress|senate|supreme court|government|policy|veto|impeach|republican|democrat|white house|administration)/.test(h)) return 'politics';
+  if (/(china|north korea|sanction|nato|un |united nations|foreign|diplomat|international|treaty|summit)/.test(h)) return 'intl';
+  return 'default';
+}
+
+function questionForHeadline(headline) {
+  const cat = categoryForHeadline(headline);
+  // Trim the headline to a clean short topic phrase
+  const topic = headline.replace(/^[A-Z]+:\s*/,'').replace(/\s*[-|]\s*BBC.*$/i,'').replace(/\s*[-|]\s*NPR.*$/i,'').replace(/\s*[-|]\s*Al Jazeera.*$/i,'').replace(/\s*[-|]\s*TIME.*$/i,'').trim();
+  return QUESTION_TEMPLATES[cat](topic);
 }
 
 function fetchText(url) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
-    const request = client.get(url, {
-      headers: { 'User-Agent': 'TrendsparkApp/1.0 (+https://trendspark.ai)' }
-    }, (response) => {
-      if (response.statusCode >= 400) {
-        reject(new Error('Feed returned ' + response.statusCode));
-        response.resume();
+    const req = client.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; TrendsparkBot/1.0; +https://trendspark.ai)',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*'
+      }
+    }, (res) => {
+      if (res.statusCode >= 400) {
+        res.resume();
+        reject(new Error(`Feed returned ${res.statusCode}`));
+        return;
+      }
+      // Follow redirects
+      if (res.statusCode >= 300 && res.headers.location) {
+        resolve(fetchText(res.headers.location));
         return;
       }
       let raw = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => { raw += chunk; });
-      response.on('end', () => resolve(raw));
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => resolve(raw));
     });
-    request.on('error', reject);
-    request.setTimeout(8000, () => { request.destroy(); reject(new Error('Timeout')); });
+    req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Timeout')); });
   });
+}
+
+function decodeEntities(s) {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#\d+;/g, '');
 }
 
 function extractTitles(xml) {
   const results = [];
-  const itemBlocks = xml.match(/<item[\s\S]*?<\/item>/g) || [];
-  for (const block of itemBlocks) {
-    const titleMatch = block.match(/<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/);
-    if (!titleMatch) continue;
-    const title = titleMatch[1].replace(/&amp;/g, '&').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#\d+;/g, '').trim();
-    if (!title || title.length < 12) continue;
-    if (!HARD_NEWS_KEYWORDS.test(title)) continue;
+  const blocks = xml.match(/<item[\s>][\s\S]*?<\/item>/g) || [];
+  for (const block of blocks) {
+    const m = block.match(/<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/);
+    if (!m) continue;
+    const title = decodeEntities(m[1]).trim();
+    if (!title || title.length < 15) continue;
     if (SOFT_BLOCKLIST.test(title)) continue;
     results.push(title);
   }
   return results;
 }
 
+// ─── Cache ─────────────────────────────────────────────────────────────────
+
 const trendingCache = {
-  questions: FALLBACK_QUESTIONS,
+  questions: FALLBACK_QUESTIONS.slice(),
   updatedAt: 0,
   refreshInFlight: null
 };
@@ -103,19 +119,20 @@ async function refreshCache() {
   trendingCache.refreshInFlight = (async () => {
     try {
       const allTitles = [];
-      for (const feedUrl of NEWS_FEEDS) {
-        try {
-          const xml = await fetchText(feedUrl);
-          allTitles.push(...extractTitles(xml));
-        } catch (feedError) {
-          console.error('Feed error (' + feedUrl + '):', feedError.message);
+      const feedResults = await Promise.allSettled(NEWS_FEEDS.map(fetchText));
+      for (const result of feedResults) {
+        if (result.status === 'fulfilled') {
+          allTitles.push(...extractTitles(result.value));
+        } else {
+          console.warn('[TopicDebate] Feed failed:', result.reason.message);
         }
       }
 
+      // Deduplicate by a short fingerprint
       const seen = new Set();
       const deduped = [];
       for (const title of allTitles) {
-        const key = title.toLowerCase().slice(0, 40);
+        const key = title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 35);
         if (seen.has(key)) continue;
         seen.add(key);
         deduped.push(title);
@@ -125,18 +142,15 @@ async function refreshCache() {
       if (deduped.length > 0) {
         trendingCache.questions = deduped.map(questionForHeadline);
         trendingCache.updatedAt = Date.now();
-        console.log('Trending USA cache refreshed with', deduped.length, 'questions');
+        console.log(`[TopicDebate] Cache refreshed – ${deduped.length} headlines`);
+        deduped.forEach((t, i) => console.log(`  ${i + 1}. ${t}`));
       } else {
-        console.warn('No qualifying headlines found, keeping current cache or fallback');
-        if (!trendingCache.updatedAt) {
-          trendingCache.questions = FALLBACK_QUESTIONS;
-        }
+        console.warn('[TopicDebate] No headlines found, keeping fallback');
+        if (!trendingCache.updatedAt) trendingCache.questions = FALLBACK_QUESTIONS.slice();
       }
-    } catch (error) {
-      console.error('Cache refresh failed:', error.message);
-      if (!trendingCache.updatedAt) {
-        trendingCache.questions = FALLBACK_QUESTIONS;
-      }
+    } catch (err) {
+      console.error('[TopicDebate] Cache refresh error:', err.message);
+      if (!trendingCache.updatedAt) trendingCache.questions = FALLBACK_QUESTIONS.slice();
     } finally {
       trendingCache.refreshInFlight = null;
     }
@@ -145,8 +159,8 @@ async function refreshCache() {
 }
 
 function ensureCache() {
-  const isStale = Date.now() - trendingCache.updatedAt > REFRESH_WINDOW_MS;
-  if ((isStale || !trendingCache.updatedAt) && !trendingCache.refreshInFlight) {
+  const stale = Date.now() - trendingCache.updatedAt > REFRESH_WINDOW_MS;
+  if ((stale || !trendingCache.updatedAt) && !trendingCache.refreshInFlight) {
     refreshCache();
   }
 }
@@ -156,7 +170,7 @@ function getTrendingQuestions() {
   return trendingCache.questions.length ? trendingCache.questions : FALLBACK_QUESTIONS;
 }
 
-// ─── Static topic question banks ─────────────────────────────────────────────
+// ─── Static topic banks ────────────────────────────────────────────────────
 
 const TOPICS = {
   religion: {
@@ -166,29 +180,26 @@ const TOPICS = {
   aiFuture: {
     title: 'AI and the Future',
     questions: [
-      'Will AI create more jobs than it destroys?',
-      'Is AI more helpful than dangerous?',
+      'Will AI create more jobs than it destroys over the next decade?',
+      'Is AI more helpful than dangerous right now?',
       'Should AI be heavily regulated by governments?',
-      'Will AI make schoolwork too easy for students?',
+      'Will AI make school and college degrees less valuable?',
       'Could AI become smarter than humans in a dangerous way?',
-      'Should people be allowed to use AI for art and music?',
-      'Will AI make human relationships weaker?',
       'Should companies have to tell you when you are talking to AI?',
       'Will AI improve daily life more than it harms privacy?',
-      'Is society moving too fast with AI?'
+      'Is society moving too fast with AI development?'
     ]
   },
   currentPolitics: {
     title: 'Current Politics',
     questions: [
-      'Is Trump a good president?',
+      'Is Trump doing a good job as president?',
       'Is the U.S. government more divided than ever?',
       'Should age limits exist for presidents and members of Congress?',
       'Is the media fair in how it covers politics?',
       'Are protests an effective way to create political change?',
       'Has politics become too extreme in recent years?',
-      'Should the government have more control over big companies?',
-      'Do political parties cause more harm than good?',
+      'Should the government have more control over big tech companies?',
       'Is the country headed in the right direction politically?',
       'Should the U.S. be more involved in international conflicts?'
     ]
@@ -196,15 +207,12 @@ const TOPICS = {
   collegeCareers: {
     title: 'College and Careers',
     questions: [
-      'Is college worth the cost?',
-      'Should trade school be pushed as much as college?',
+      'Is college worth the cost anymore?',
+      'Should trade school be pushed as hard as college?',
       'Is it better to follow your passion or choose a high-paying career?',
-      'Should students pick a career path earlier in life?',
-      'Is networking more important than talent in getting a good job?',
-      'Will college matter less in the future?',
+      'Is networking more important than raw talent in getting a good job?',
+      'Will a college degree matter less in ten years?',
       'Should internships always be paid?',
-      'Is job stability more important than loving your work?',
-      'Should success be measured more by money or happiness?',
       'Is starting your own business better than working for someone else?'
     ]
   },
@@ -213,13 +221,11 @@ const TOPICS = {
     questions: [
       'Is LeBron better than Jordan?',
       'Is winning more important than sportsmanship?',
-      'Should college athletes be paid more?',
-      'Are referees and umpires too protected from criticism?',
-      'Are athletes overpaid?',
-      'Is team loyalty more important than going where you can win?',
-      'Should performance-enhancing drug users be permanently banned?',
-      'Are dynasties good for sports?',
-      'Is football too dangerous to justify?',
+      'Should college athletes be paid?',
+      'Are athletes overpaid compared to other professions?',
+      'Should performance-enhancing drug users be permanently banned from their sport?',
+      'Are dynasties good or bad for sports?',
+      'Is football too dangerous to keep playing at the youth level?',
       'Should trash talk be considered part of the game?'
     ]
   }
@@ -228,7 +234,7 @@ const TOPICS = {
 function randomQuestion(gameType) {
   const topic = TOPICS[gameType] || TOPICS.religion;
   const questions = typeof topic.getQuestions === 'function' ? topic.getQuestions() : topic.questions;
-  const pool = questions && questions.length ? questions : FALLBACK_QUESTIONS;
+  const pool = (questions && questions.length) ? questions : FALLBACK_QUESTIONS;
   return {
     topicKey: gameType,
     topicTitle: topic.title,
