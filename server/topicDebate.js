@@ -3,8 +3,8 @@ const Game = require('./game');
 
 const TRENDING_USA_TITLE = 'Trending in the USA';
 const TRENDING_USA_RSS = 'https://trends.google.com/trending/rss?geo=US';
-const REFRESH_WINDOW_MS = 60 * 60 * 1000;
-const RECENT_NEWS_WINDOW_MS = 72 * 60 * 60 * 1000;
+const REFRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
+const RECENT_NEWS_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_TREND_QUESTIONS = 12;
 
 const FALLBACK_TRENDING_QUESTIONS = [
