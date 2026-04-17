@@ -15,6 +15,17 @@ const FALLBACK_TRENDING_QUESTIONS = [
   "Will today's biggest U.S. news still matter next week, or is it just a short-term trend?"
 ];
 
+const MAJOR_NEWS_SOURCE_KEYWORDS = [
+  'associated press', 'ap news', 'reuters', 'bbc', 'cnn', 'fox news', 'nbc news',
+  'abc news', 'cbs news', 'npr', 'new york times', 'washington post', 'wall street journal',
+  'usa today', 'bloomberg', 'politico', 'axios', 'guardian', 'financial times', 'the hill',
+  'al jazeera', 'msnbc', 'cnbc', 'pbs'
+];
+
+const HARD_NEWS_KEYWORDS = /(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|military|ceasefire|election|president|senate|senator|congress|government|policy|bill|veto|supreme court|politic|economy|inflation|tariff|market|stocks|jobs|trade|prices|recession|federal reserve|interest rates|immigration|border|protest|sanction|treaty|diplomacy|prime minister|governor|mayor|budget)/i;
+
+const SOFT_TREND_BLOCKLIST = /(season|episode|finale|trailer|netflix|hbo|max|movie|film|tv show|celebrity|actor|actress|album|song|tour|concert|music|box office|playoff|game|vs\.| vs |score|draft|trade deadline|championship|sports|nhl|nba|nfl|mlb|soccer|football|basketball|baseball|wwe|ufc|anime|manga|gaming|gameplay|nintendo|xbox|playstation|steam|assassin's creed|marvel|dc|fashion|dating|influencer)/i;
+
 const TOPICS = {
   religion: {
     title: TRENDING_USA_TITLE,
@@ -133,6 +144,24 @@ function normalizeTopic(text) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function sourceLooksMajor(source) {
+  const normalized = normalizeTopic(source).toLowerCase();
+  return MAJOR_NEWS_SOURCE_KEYWORDS.some((keyword) => normalized.includes(keyword));
+}
+
+function isMajorHardNewsItem(item) {
+  const context = `${item.trend} ${item.headlines.join(' ')}`.toLowerCase();
+  const hasHardNewsKeywords = HARD_NEWS_KEYWORDS.test(context);
+  const looksSoft = SOFT_TREND_BLOCKLIST.test(context);
+  const hasMajorSource = item.sources.some(sourceLooksMajor);
+
+  if (looksSoft && !hasHardNewsKeywords) {
+    return false;
+  }
+
+  return hasHardNewsKeywords || hasMajorSource;
+}
+
 function buildNewsBackedQuestion(trend, headlines) {
   const cleanTrend = normalizeTopic(trend);
   const primaryHeadline = normalizeTopic((headlines && headlines[0]) || '');
@@ -172,15 +201,20 @@ function parseTrendItems(xml) {
       const headlines = extractTagContent(item, 'ht:news_item_title')
         .map((headline) => headline.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim())
         .filter(Boolean);
+      const sources = extractTagContent(item, 'ht:news_item_source')
+        .map((source) => source.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim())
+        .filter(Boolean);
       const publishedAt = pubDateRaw ? Date.parse(pubDateRaw) : NaN;
       return {
         trend: trend ? trend.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : '',
         headlines,
+        sources,
         publishedAt: Number.isNaN(publishedAt) ? now : publishedAt
       };
     })
     .filter((item) => item.trend)
-    .filter((item) => now - item.publishedAt <= RECENT_NEWS_WINDOW_MS);
+    .filter((item) => now - item.publishedAt <= RECENT_NEWS_WINDOW_MS)
+    .filter(isMajorHardNewsItem);
 }
 
 async function refreshTrendingUSACache() {
