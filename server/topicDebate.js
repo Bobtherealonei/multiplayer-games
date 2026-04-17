@@ -3,23 +3,16 @@ const Game = require('./game');
 
 const TRENDING_USA_TITLE = 'Trending in the USA';
 const TRENDING_USA_RSS = 'https://trends.google.com/trending/rss?geo=US';
-const DAILY_REFRESH_MS = 24 * 60 * 60 * 1000;
+const REFRESH_WINDOW_MS = 60 * 60 * 1000;
+const RECENT_NEWS_WINDOW_MS = 72 * 60 * 60 * 1000;
 const MAX_TREND_QUESTIONS = 12;
 
-const TREND_QUESTION_TEMPLATES = [
-  (trend) => `Is "${trend}" worth all the attention it is getting in the USA right now?`,
-  (trend) => `Is the public reaction to "${trend}" justified?`,
-  (trend) => `Will "${trend}" still matter a week from now, or is it just a moment?`,
-  (trend) => `Is social media helping people understand "${trend}", or just making it louder?`,
-  (trend) => `Is "${trend}" mostly meaningful news or mostly online hype?`
-];
-
 const FALLBACK_TRENDING_QUESTIONS = [
-  'Is this trend worth all the attention it is getting in the USA right now?',
-  'Is the public reaction to this trend justified?',
-  'Will this trend still matter a week from now, or is it just a moment?',
-  'Is social media helping people understand this trend, or just making it louder?',
-  'Is this trend mostly meaningful news or mostly online hype?'
+  'Based on the biggest stories in the U.S. right now, is the public reaction justified?',
+  'Is the latest trending news in the U.S. being handled the right way?',
+  'Are the biggest U.S. headlines right now genuinely important, or just overhyped?',
+  "Is social media helping people understand today's top U.S. stories, or just making them louder?",
+  "Will today's biggest U.S. news still matter next week, or is it just a short-term trend?"
 ];
 
 const TOPICS = {
@@ -106,7 +99,7 @@ function decodeXmlEntities(text) {
 }
 
 function extractTagContent(xml, tagName) {
-  const regex = new RegExp(`<${tagName}>([\s\S]*?)<\/${tagName}>`, 'g');
+  const regex = new RegExp(String.raw`<${tagName}>([\s\S]*?)</${tagName}>`, 'g');
   const values = [];
   let match;
   while ((match = regex.exec(xml)) !== null) {
@@ -136,10 +129,58 @@ function fetchText(url) {
   });
 }
 
-function buildTrendQuestion(trend, index) {
-  const cleanTrend = trend.replace(/\s+/g, ' ').trim();
-  const template = TREND_QUESTION_TEMPLATES[index % TREND_QUESTION_TEMPLATES.length];
-  return template(cleanTrend);
+function normalizeTopic(text) {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function buildNewsBackedQuestion(trend, headlines) {
+  const cleanTrend = normalizeTopic(trend);
+  const primaryHeadline = normalizeTopic((headlines && headlines[0]) || '');
+  const context = `${cleanTrend} ${headlines.join(' ')}`.toLowerCase();
+
+  if (/(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|military)/.test(context)) {
+    return `Based on the latest news around "${cleanTrend}", is the current response to the conflict the right move?`;
+  }
+
+  if (/(election|president|senate|senator|congress|government|policy|bill|veto|supreme court|politic)/.test(context)) {
+    return `Based on the latest news around "${cleanTrend}", is the government response helping more than hurting?`;
+  }
+
+  if (/(economy|inflation|tariff|market|stocks|jobs|trade|prices|recession)/.test(context)) {
+    return `Does the latest news around "${cleanTrend}" suggest the economy is moving in the right direction?`;
+  }
+
+  if (/(vs\.| vs |playoff|finale|game|season|trade deadline|draft|championship)/.test(context)) {
+    return `Does "${cleanTrend}" deserve to be one of the biggest sports stories in the U.S. right now?`;
+  }
+
+  if (primaryHeadline) {
+    return `After "${primaryHeadline}", is the reaction to "${cleanTrend}" justified?`;
+  }
+
+  return `Based on the latest news around "${cleanTrend}", is all the attention justified right now?`;
+}
+
+function parseTrendItems(xml) {
+  const now = Date.now();
+  const itemBlocks = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+
+  return itemBlocks
+    .map((item) => {
+      const trend = extractTagContent(item, 'title')[0];
+      const pubDateRaw = extractTagContent(item, 'pubDate')[0];
+      const headlines = extractTagContent(item, 'ht:news_item_title')
+        .map((headline) => headline.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim())
+        .filter(Boolean);
+      const publishedAt = pubDateRaw ? Date.parse(pubDateRaw) : NaN;
+      return {
+        trend: trend ? trend.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : '',
+        headlines,
+        publishedAt: Number.isNaN(publishedAt) ? now : publishedAt
+      };
+    })
+    .filter((item) => item.trend)
+    .filter((item) => now - item.publishedAt <= RECENT_NEWS_WINDOW_MS);
 }
 
 async function refreshTrendingUSACache() {
@@ -150,15 +191,28 @@ async function refreshTrendingUSACache() {
   trendingCache.refreshInFlight = (async () => {
     try {
       const xml = await fetchText(TRENDING_USA_RSS);
-      const itemBlocks = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
-      const titles = itemBlocks
-        .map((item) => extractTagContent(item, 'title')[0])
-        .filter(Boolean)
-        .map((title) => title.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim());
+      const items = parseTrendItems(xml);
+      const deduped = [];
+      const seen = new Set();
 
-      const uniqueTitles = [...new Set(titles)].slice(0, MAX_TREND_QUESTIONS);
-      if (uniqueTitles.length > 0) {
-        trendingCache.questions = uniqueTitles.map((trend, index) => buildTrendQuestion(trend, index));
+      for (const item of items) {
+        const key = item.trend.toLowerCase();
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        deduped.push(item);
+        if (deduped.length >= MAX_TREND_QUESTIONS) {
+          break;
+        }
+      }
+
+      const generatedQuestions = deduped
+        .map((item) => buildNewsBackedQuestion(item.trend, item.headlines))
+        .filter(Boolean);
+
+      if (generatedQuestions.length > 0) {
+        trendingCache.questions = generatedQuestions;
         trendingCache.updatedAt = Date.now();
       }
     } catch (error) {
@@ -175,9 +229,9 @@ async function refreshTrendingUSACache() {
 }
 
 function ensureTrendingUSACache() {
-  const isStale = Date.now() - trendingCache.updatedAt > DAILY_REFRESH_MS;
-  const hasFallbackOnly = !Array.isArray(trendingCache.questions) || trendingCache.questions.length === 0;
-  if ((isStale || hasFallbackOnly) && !trendingCache.refreshInFlight) {
+  const isStale = Date.now() - trendingCache.updatedAt > REFRESH_WINDOW_MS;
+  const hasNoQuestions = !Array.isArray(trendingCache.questions) || trendingCache.questions.length === 0;
+  if ((isStale || hasNoQuestions) && !trendingCache.refreshInFlight) {
     refreshTrendingUSACache();
   }
 }
