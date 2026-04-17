@@ -1,35 +1,167 @@
 const https = require('https');
+const http = require('http');
 const Game = require('./game');
 
 const TRENDING_USA_TITLE = 'Trending in the USA';
-const TRENDING_USA_RSS = 'https://trends.google.com/trending/rss?geo=US';
 const REFRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
-const RECENT_NEWS_WINDOW_MS = 24 * 60 * 60 * 1000;
-const MAX_TREND_QUESTIONS = 12;
+const MAX_QUESTIONS = 10;
 
-const FALLBACK_TRENDING_QUESTIONS = [
-  'Based on the biggest stories in the U.S. right now, is the public reaction justified?',
-  'Is the latest trending news in the U.S. being handled the right way?',
-  'Are the biggest U.S. headlines right now genuinely important, or just overhyped?',
-  "Is social media helping people understand today's top U.S. stories, or just making them louder?",
-  "Will today's biggest U.S. news still matter next week, or is it just a short-term trend?"
+// Major mainstream news RSS feeds - these only ever carry hard news
+const NEWS_FEEDS = [
+  'https://feeds.reuters.com/reuters/topNews',
+  'https://feeds.npr.org/1001/rss.xml',
+  'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml'
 ];
 
-const MAJOR_NEWS_SOURCE_KEYWORDS = [
-  'associated press', 'ap news', 'reuters', 'bbc', 'cnn', 'fox news', 'nbc news',
-  'abc news', 'cbs news', 'npr', 'new york times', 'washington post', 'wall street journal',
-  'usa today', 'bloomberg', 'politico', 'axios', 'guardian', 'financial times', 'the hill',
-  'al jazeera', 'msnbc', 'cnbc', 'pbs'
+const FALLBACK_QUESTIONS = [
+  'Is the U.S. response to the current conflict in the Middle East the right move?',
+  'Is the government handling the biggest story in the news right now correctly?',
+  'Are the current U.S. foreign policy decisions making America stronger or weaker?',
+  "Is the media covering today's biggest story fairly?",
+  'Should the U.S. be more involved in what is happening internationally right now?'
 ];
 
-const HARD_NEWS_KEYWORDS = /(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|military|ceasefire|election|president|senate|senator|congress|government|policy|bill|veto|supreme court|politic|economy|inflation|tariff|market|stocks|jobs|trade|prices|recession|federal reserve|interest rates|immigration|border|protest|sanction|treaty|diplomacy|prime minister|governor|mayor|budget)/i;
+// Only turn a headline into a question if it is clearly major news
+const HARD_NEWS_KEYWORDS = /(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|russia|military|ceasefire|shooting|killed|dead|crisis|hostage|evacuation|election|president|trump|biden|congress|senate|supreme court|government|policy|veto|impeach|inflation|tariff|economy|recession|federal reserve|interest rate|immigration|border|deportation|sanction|nuclear|nato|china|north korea)/i;
 
-const SOFT_TREND_BLOCKLIST = /(season|episode|finale|trailer|netflix|hbo|max|movie|film|tv show|celebrity|actor|actress|album|song|tour|concert|music|box office|playoff|game|vs\.| vs |score|draft|trade deadline|championship|sports|nhl|nba|nfl|mlb|soccer|football|basketball|baseball|wwe|ufc|anime|manga|gaming|gameplay|nintendo|xbox|playstation|steam|assassin's creed|marvel|dc|fashion|dating|influencer)/i;
+// Block anything that is clearly entertainment or sports
+const SOFT_BLOCKLIST = /(season \\d|episode|finale|trailer|netflix|hbo|disney\+|movie|film|album|song|concert|celebrity|actor|actress|nhl|nba|nfl|mlb|fifa|ufc|wwe|gaming|playstation|xbox|nintendo|anime|manga|fashion|influencer)/i;
+
+const QUESTION_TEMPLATES = {
+  war: (topic) => `Is the U.S. response to what is happening with "${topic}" the right move?`,
+  politics: (topic) => `Is the government handling "${topic}" the right way?`,
+  economy: (topic) => `Does what is happening with "${topic}" mean the economy is headed in the wrong direction?`,
+  immigration: (topic) => `Is the U.S. approach to "${topic}" fair?`,
+  international: (topic) => `Should the U.S. be more or less involved in the situation around "${topic}"?`,
+  default: (topic) => `Is the public reaction to "${topic}" justified?`
+};
+
+function questionForHeadline(headline) {
+  const h = headline.toLowerCase();
+  if (/(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|russia|military|ceasefire|killed|hostage|nuclear|nato)/.test(h)) {
+    return QUESTION_TEMPLATES.war(headline);
+  }
+  if (/(immigration|border|deportation|migrant)/.test(h)) {
+    return QUESTION_TEMPLATES.immigration(headline);
+  }
+  if (/(economy|inflation|tariff|recession|interest rate|market|stocks|jobs|federal reserve)/.test(h)) {
+    return QUESTION_TEMPLATES.economy(headline);
+  }
+  if (/(election|president|trump|biden|congress|senate|supreme court|government|policy|veto|impeach)/.test(h)) {
+    return QUESTION_TEMPLATES.politics(headline);
+  }
+  if (/(china|north korea|sanction|nato|international|foreign)/.test(h)) {
+    return QUESTION_TEMPLATES.international(headline);
+  }
+  return QUESTION_TEMPLATES.default(headline);
+}
+
+function fetchText(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    const request = client.get(url, {
+      headers: { 'User-Agent': 'TrendsparkApp/1.0 (+https://trendspark.ai)' }
+    }, (response) => {
+      if (response.statusCode >= 400) {
+        reject(new Error('Feed returned ' + response.statusCode));
+        response.resume();
+        return;
+      }
+      let raw = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { raw += chunk; });
+      response.on('end', () => resolve(raw));
+    });
+    request.on('error', reject);
+    request.setTimeout(8000, () => { request.destroy(); reject(new Error('Timeout')); });
+  });
+}
+
+function extractTitles(xml) {
+  const results = [];
+  const itemBlocks = xml.match(/<item[\s\S]*?<\/item>/g) || [];
+  for (const block of itemBlocks) {
+    const titleMatch = block.match(/<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/);
+    if (!titleMatch) continue;
+    const title = titleMatch[1].replace(/&amp;/g, '&').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#\d+;/g, '').trim();
+    if (!title || title.length < 12) continue;
+    if (!HARD_NEWS_KEYWORDS.test(title)) continue;
+    if (SOFT_BLOCKLIST.test(title)) continue;
+    results.push(title);
+  }
+  return results;
+}
+
+const trendingCache = {
+  questions: FALLBACK_QUESTIONS,
+  updatedAt: 0,
+  refreshInFlight: null
+};
+
+async function refreshCache() {
+  if (trendingCache.refreshInFlight) return trendingCache.refreshInFlight;
+  trendingCache.refreshInFlight = (async () => {
+    try {
+      const allTitles = [];
+      for (const feedUrl of NEWS_FEEDS) {
+        try {
+          const xml = await fetchText(feedUrl);
+          allTitles.push(...extractTitles(xml));
+        } catch (feedError) {
+          console.error('Feed error (' + feedUrl + '):', feedError.message);
+        }
+      }
+
+      const seen = new Set();
+      const deduped = [];
+      for (const title of allTitles) {
+        const key = title.toLowerCase().slice(0, 40);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(title);
+        if (deduped.length >= MAX_QUESTIONS) break;
+      }
+
+      if (deduped.length > 0) {
+        trendingCache.questions = deduped.map(questionForHeadline);
+        trendingCache.updatedAt = Date.now();
+        console.log('Trending USA cache refreshed with', deduped.length, 'questions');
+      } else {
+        console.warn('No qualifying headlines found, keeping current cache or fallback');
+        if (!trendingCache.updatedAt) {
+          trendingCache.questions = FALLBACK_QUESTIONS;
+        }
+      }
+    } catch (error) {
+      console.error('Cache refresh failed:', error.message);
+      if (!trendingCache.updatedAt) {
+        trendingCache.questions = FALLBACK_QUESTIONS;
+      }
+    } finally {
+      trendingCache.refreshInFlight = null;
+    }
+  })();
+  return trendingCache.refreshInFlight;
+}
+
+function ensureCache() {
+  const isStale = Date.now() - trendingCache.updatedAt > REFRESH_WINDOW_MS;
+  if ((isStale || !trendingCache.updatedAt) && !trendingCache.refreshInFlight) {
+    refreshCache();
+  }
+}
+
+function getTrendingQuestions() {
+  ensureCache();
+  return trendingCache.questions.length ? trendingCache.questions : FALLBACK_QUESTIONS;
+}
+
+// ─── Static topic question banks ─────────────────────────────────────────────
 
 const TOPICS = {
   religion: {
     title: TRENDING_USA_TITLE,
-    getQuestions: () => getTrendingUSAQuestions()
+    getQuestions: getTrendingQuestions
   },
   aiFuture: {
     title: 'AI and the Future',
@@ -50,7 +182,6 @@ const TOPICS = {
     title: 'Current Politics',
     questions: [
       'Is Trump a good president?',
-      'Is Biden too old to be president?',
       'Is the U.S. government more divided than ever?',
       'Should age limits exist for presidents and members of Congress?',
       'Is the media fair in how it covers politics?',
@@ -58,7 +189,8 @@ const TOPICS = {
       'Has politics become too extreme in recent years?',
       'Should the government have more control over big companies?',
       'Do political parties cause more harm than good?',
-      'Is the country headed in the right direction politically?'
+      'Is the country headed in the right direction politically?',
+      'Should the U.S. be more involved in international conflicts?'
     ]
   },
   collegeCareers: {
@@ -93,199 +225,18 @@ const TOPICS = {
   }
 };
 
-const trendingCache = {
-  title: TRENDING_USA_TITLE,
-  questions: FALLBACK_TRENDING_QUESTIONS,
-  updatedAt: 0,
-  refreshInFlight: null
-};
-
-function decodeXmlEntities(text) {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&apos;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function extractTagContent(xml, tagName) {
-  const regex = new RegExp(String.raw`<${tagName}>([\s\S]*?)</${tagName}>`, 'g');
-  const values = [];
-  let match;
-  while ((match = regex.exec(xml)) !== null) {
-    values.push(decodeXmlEntities(match[1].trim()));
-  }
-  return values;
-}
-
-function fetchText(url) {
-  return new Promise((resolve, reject) => {
-    https
-      .get(url, (response) => {
-        if (response.statusCode && response.statusCode >= 400) {
-          reject(new Error(`Trend feed request failed with status ${response.statusCode}`));
-          response.resume();
-          return;
-        }
-
-        let raw = '';
-        response.setEncoding('utf8');
-        response.on('data', (chunk) => {
-          raw += chunk;
-        });
-        response.on('end', () => resolve(raw));
-      })
-      .on('error', reject);
-  });
-}
-
-function normalizeTopic(text) {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-function sourceLooksMajor(source) {
-  const normalized = normalizeTopic(source).toLowerCase();
-  return MAJOR_NEWS_SOURCE_KEYWORDS.some((keyword) => normalized.includes(keyword));
-}
-
-function isMajorHardNewsItem(item) {
-  const context = `${item.trend} ${item.headlines.join(' ')}`.toLowerCase();
-  const hasHardNewsKeywords = HARD_NEWS_KEYWORDS.test(context);
-  const looksSoft = SOFT_TREND_BLOCKLIST.test(context);
-  const hasMajorSource = item.sources.some(sourceLooksMajor);
-
-  if (looksSoft && !hasHardNewsKeywords) {
-    return false;
-  }
-
-  return hasHardNewsKeywords || hasMajorSource;
-}
-
-function buildNewsBackedQuestion(trend, headlines) {
-  const cleanTrend = normalizeTopic(trend);
-  const primaryHeadline = normalizeTopic((headlines && headlines[0]) || '');
-  const context = `${cleanTrend} ${headlines.join(' ')}`.toLowerCase();
-
-  if (/(war|attack|missile|bomb|conflict|iran|israel|gaza|ukraine|military)/.test(context)) {
-    return `Based on the latest news around "${cleanTrend}", is the current response to the conflict the right move?`;
-  }
-
-  if (/(election|president|senate|senator|congress|government|policy|bill|veto|supreme court|politic)/.test(context)) {
-    return `Based on the latest news around "${cleanTrend}", is the government response helping more than hurting?`;
-  }
-
-  if (/(economy|inflation|tariff|market|stocks|jobs|trade|prices|recession)/.test(context)) {
-    return `Does the latest news around "${cleanTrend}" suggest the economy is moving in the right direction?`;
-  }
-
-  if (/(vs\.| vs |playoff|finale|game|season|trade deadline|draft|championship)/.test(context)) {
-    return `Does "${cleanTrend}" deserve to be one of the biggest sports stories in the U.S. right now?`;
-  }
-
-  if (primaryHeadline) {
-    return `After "${primaryHeadline}", is the reaction to "${cleanTrend}" justified?`;
-  }
-
-  return `Based on the latest news around "${cleanTrend}", is all the attention justified right now?`;
-}
-
-function parseTrendItems(xml) {
-  const now = Date.now();
-  const itemBlocks = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
-
-  return itemBlocks
-    .map((item) => {
-      const trend = extractTagContent(item, 'title')[0];
-      const pubDateRaw = extractTagContent(item, 'pubDate')[0];
-      const headlines = extractTagContent(item, 'ht:news_item_title')
-        .map((headline) => headline.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim())
-        .filter(Boolean);
-      const sources = extractTagContent(item, 'ht:news_item_source')
-        .map((source) => source.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim())
-        .filter(Boolean);
-      const publishedAt = pubDateRaw ? Date.parse(pubDateRaw) : NaN;
-      return {
-        trend: trend ? trend.replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : '',
-        headlines,
-        sources,
-        publishedAt: Number.isNaN(publishedAt) ? now : publishedAt
-      };
-    })
-    .filter((item) => item.trend)
-    .filter((item) => now - item.publishedAt <= RECENT_NEWS_WINDOW_MS)
-    .filter(isMajorHardNewsItem);
-}
-
-async function refreshTrendingUSACache() {
-  if (trendingCache.refreshInFlight) {
-    return trendingCache.refreshInFlight;
-  }
-
-  trendingCache.refreshInFlight = (async () => {
-    try {
-      const xml = await fetchText(TRENDING_USA_RSS);
-      const items = parseTrendItems(xml);
-      const deduped = [];
-      const seen = new Set();
-
-      for (const item of items) {
-        const key = item.trend.toLowerCase();
-        if (seen.has(key)) {
-          continue;
-        }
-        seen.add(key);
-        deduped.push(item);
-        if (deduped.length >= MAX_TREND_QUESTIONS) {
-          break;
-        }
-      }
-
-      const generatedQuestions = deduped
-        .map((item) => buildNewsBackedQuestion(item.trend, item.headlines))
-        .filter(Boolean);
-
-      if (generatedQuestions.length > 0) {
-        trendingCache.questions = generatedQuestions;
-        trendingCache.updatedAt = Date.now();
-      }
-    } catch (error) {
-      console.error('Trending USA refresh failed:', error.message);
-      if (!trendingCache.updatedAt) {
-        trendingCache.questions = FALLBACK_TRENDING_QUESTIONS;
-      }
-    } finally {
-      trendingCache.refreshInFlight = null;
-    }
-  })();
-
-  return trendingCache.refreshInFlight;
-}
-
-function ensureTrendingUSACache() {
-  const isStale = Date.now() - trendingCache.updatedAt > REFRESH_WINDOW_MS;
-  const hasNoQuestions = !Array.isArray(trendingCache.questions) || trendingCache.questions.length === 0;
-  if ((isStale || hasNoQuestions) && !trendingCache.refreshInFlight) {
-    refreshTrendingUSACache();
-  }
-}
-
-function getTrendingUSAQuestions() {
-  ensureTrendingUSACache();
-  return trendingCache.questions.length ? trendingCache.questions : FALLBACK_TRENDING_QUESTIONS;
-}
-
 function randomQuestion(gameType) {
   const topic = TOPICS[gameType] || TOPICS.religion;
   const questions = typeof topic.getQuestions === 'function' ? topic.getQuestions() : topic.questions;
-  const sourceQuestions = questions && questions.length ? questions : FALLBACK_TRENDING_QUESTIONS;
-  const index = Math.floor(Math.random() * sourceQuestions.length);
+  const pool = questions && questions.length ? questions : FALLBACK_QUESTIONS;
   return {
     topicKey: gameType,
     topicTitle: topic.title,
-    question: sourceQuestions[index]
+    question: pool[Math.floor(Math.random() * pool.length)]
   };
 }
+
+// ─── Game class ───────────────────────────────────────────────────────────────
 
 class TopicDebate extends Game {
   constructor() {
@@ -298,14 +249,11 @@ class TopicDebate extends Game {
     this.matchRequests = { P1: false, P2: false };
     this.winner = null;
     this.isDraw = false;
-    ensureTrendingUSACache();
+    ensureCache();
   }
 
   createGame(players) {
-    if (players.length !== 2) {
-      throw new Error('TopicDebate requires exactly 2 players');
-    }
-
+    if (players.length !== 2) throw new Error('TopicDebate requires exactly 2 players');
     this.players = players;
     this.playerSymbols.set(players[0].id, 'P1');
     this.playerSymbols.set(players[1].id, 'P2');
@@ -318,7 +266,6 @@ class TopicDebate extends Game {
     this.winner = null;
     this.isDraw = false;
     this.createdAt = Date.now();
-
     return {
       success: true,
       player1: { id: players[0].id, symbol: 'P1' },
@@ -327,21 +274,13 @@ class TopicDebate extends Game {
   }
 
   makeMove(playerId, move) {
-    const playerSymbol = this.playerSymbols.get(playerId);
-    if (!playerSymbol) {
-      return { success: false, error: 'Player not in this debate' };
-    }
-
+    const sym = this.playerSymbols.get(playerId);
+    if (!sym) return { success: false, error: 'Player not in this debate' };
     if (move && typeof move.readyToMatch === 'boolean') {
-      this.matchRequests[playerSymbol] = move.readyToMatch;
-      if (this.matchRequests.P1 && this.matchRequests.P2) {
-        this.phase = 'matched';
-      } else {
-        this.phase = 'debating';
-      }
+      this.matchRequests[sym] = move.readyToMatch;
+      this.phase = (this.matchRequests.P1 && this.matchRequests.P2) ? 'matched' : 'debating';
       return { success: true };
     }
-
     return { success: false, error: 'Invalid debate action' };
   }
 
@@ -361,9 +300,7 @@ class TopicDebate extends Game {
     };
   }
 
-  isFinished() {
-    return false;
-  }
+  isFinished() { return false; }
 
   cleanup() {
     super.cleanup();
@@ -376,6 +313,6 @@ class TopicDebate extends Game {
   }
 }
 
-ensureTrendingUSACache();
+ensureCache();
 
 module.exports = TopicDebate;
