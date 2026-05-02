@@ -6,6 +6,7 @@ const GameManager = require('./gameManager');
 const Matchmaking = require('./matchmaking');
 const factCheckRoute = require('./factcheck');
 const coachRoute = require('./coach');
+const judgeRoute = require('./judge');
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.get('/', (req, res) => {
 // LLM proxy routes (keys live only in Render env vars).
 app.use(factCheckRoute.makeRouter());
 app.use(coachRoute.makeRouter());
+app.use(judgeRoute.makeRouter());
 
 // Store user ID mapping: socket.id -> userId
 const socketToUserId = new Map();
