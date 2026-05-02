@@ -14,12 +14,13 @@ function buildSystemPrompt(todayHuman) {
 
 YOUR TASK
 1. Read the full transcript carefully.
-2. Score each player on the scale below.
-3. Pick a winner using the WINNER RULES below.
-4. Write a 2-4 sentence review explaining the decision. Quote or paraphrase the strongest specific argument from each side that actually contributed. If a player was silent or hostile, say so plainly. Do not share your personal opinion on the topic.
+2. Score each player independently from 0 to 10 using the scale below.
+3. Write a 2-4 sentence review explaining the scores. Quote or paraphrase the strongest specific argument from each side that actually contributed. If a player was silent or hostile, say so plainly. Do not share your personal opinion on the topic.
+
+You do NOT pick the winner. The application code will compare the two scores numerically — your only job is to set them honestly.
 
 SCORING SCALE (apply STRICTLY — do not inflate scores out of politeness)
-- 0  = did not participate at all.
+- 0  = did not participate at all (no messages, or only whitespace).
 - 1  = only sent gibberish, spam, or a single useless message.
 - 2  = ONLY insults, profanity, slurs, hate speech, or trolling. No actual argument.
 - 3  = weak, off-topic, or contradictory; almost no reasoning.
@@ -34,18 +35,13 @@ ANY of these caps a player at 2 OR LOWER, regardless of length:
 - Pure trolling / off-topic spam.
 - Made significant factually false claims that current web sources contradict.
 
-WINNER RULES (apply IN ORDER — the first match wins)
-1. If exactly ONE player participated meaningfully (the other was silent, gibberish, or pure insults), the participating player WINS. Do NOT call this a tie.
-2. If both players participated and one scored at least 2 points higher, that player wins.
-3. Only return "tie" when BOTH players participated meaningfully AND their scores are within 1 point.
-
 DO NOT
-- Do not default to "tie" because the chat was short or you feel uncertain. Pick the player who did better.
+- Do not adjust scores so they come out equal or unequal — score each player on their own merits, ignoring what the other got.
 - Do not score insults or trolling as if they were arguments.
-- Do not soften the score of a hostile player. Reflect what actually happened.
+- Do not soften the score of a hostile or silent player. Reflect what actually happened.
+- Do not write "winner" or "tie" anywhere in your output. The code decides that.
 
 Return EXACTLY this format (no markdown, no extra prose, no JSON):
-Winner: <X|O|tie>
 ScoreX: <integer 0-10>
 ScoreO: <integer 0-10>
 Review: <2-4 sentences>`;
@@ -58,10 +54,6 @@ function parseJudgeReply(content) {
       .replace(new RegExp(`^${prefix}`, 'i'), '')
       .trim();
 
-  const winnerRaw = findLine('winner:').toUpperCase();
-  let winner = 'tie';
-  if (winnerRaw === 'X' || winnerRaw === 'O') winner = winnerRaw;
-
   const parseScore = (raw) => {
     const n = parseInt(raw, 10);
     if (!Number.isFinite(n)) return 5;
@@ -71,7 +63,88 @@ function parseJudgeReply(content) {
   const scoreO = parseScore(findLine('scoreo:'));
   const review = findLine('review:') || (content || '').trim();
 
+  // Winner is computed from the scores deterministically — the model is not
+  // allowed to decide it. Pure number comparison: higher score wins, equal = tie.
+  let winner;
+  if (scoreX > scoreO) winner = 'X';
+  else if (scoreO > scoreX) winner = 'O';
+  else winner = 'tie';
+
   return { winner, scoreX, scoreO, review };
+}
+
+// In-memory cache: gameId -> { promise: Promise<result>, expiresAt: number }.
+// Both players in a debate POST /judge with the same gameId; the first caller
+// kicks off the Sonar request, the second caller awaits the same Promise — so
+// both players see the identical verdict and Sonar is only charged once.
+const judgeCache = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000;     // 10 minutes
+const MAX_CACHE_ENTRIES = 500;           // safety cap
+
+function pruneCache() {
+  const now = Date.now();
+  for (const [key, entry] of judgeCache) {
+    if (entry.expiresAt <= now) judgeCache.delete(key);
+  }
+  // Hard cap (drop oldest by insertion order — Map preserves order).
+  while (judgeCache.size > MAX_CACHE_ENTRIES) {
+    const oldest = judgeCache.keys().next().value;
+    judgeCache.delete(oldest);
+  }
+}
+
+async function callSonar(apiKey, topic, question, safeMessages) {
+  const transcript = safeMessages
+    .map((m) => {
+      const label = m.player === 'O' ? 'O' : 'X';
+      return `[Player ${label}]: ${m.text.trim()}`;
+    })
+    .join('\n');
+
+  const now = new Date();
+  const todayHuman = now.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  const userPrompt =
+    `Topic: ${topic}\n` +
+    `Debate Question: ${question}\n\n` +
+    `Transcript:\n${transcript}`;
+
+  const upstream = await fetch(PERPLEXITY_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      temperature: 0.2,
+      max_tokens: 500,
+      search_recency_filter: 'month',
+      messages: [
+        { role: 'system', content: buildSystemPrompt(todayHuman) },
+        { role: 'user', content: userPrompt },
+      ],
+    }),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text().catch(() => '');
+    const err = new Error(`Perplexity ${upstream.status}: ${errText}`);
+    err.status = upstream.status;
+    throw err;
+  }
+
+  const data = await upstream.json();
+  const content = data?.choices?.[0]?.message?.content || '';
+  const sources = Array.isArray(data?.citations) ? data.citations : [];
+
+  const parsed = parseJudgeReply(content);
+  return { ...parsed, sources };
 }
 
 function makeRouter() {
@@ -83,12 +156,11 @@ function makeRouter() {
       return res.status(500).json({ error: 'Server misconfigured: PERPLEXITY_API_KEY not set' });
     }
 
-    const { topic = '', question = '', messages = [] } = req.body || {};
+    const { topic = '', question = '', messages = [], gameId = '' } = req.body || {};
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'messages must be an array' });
     }
 
-    // Cap to last N to keep token cost bounded.
     const MAX_MESSAGES = 80;
     const safeMessages = messages
       .filter((m) => m && typeof m.text === 'string' && m.text.trim().length > 0)
@@ -104,60 +176,39 @@ function makeRouter() {
       });
     }
 
-    const transcript = safeMessages
-      .map((m) => {
-        const label = m.player === 'O' ? 'O' : 'X';
-        return `[Player ${label}]: ${m.text.trim()}`;
-      })
-      .join('\n');
+    pruneCache();
 
-    const now = new Date();
-    const todayHuman = now.toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-    });
+    // If a gameId is provided and we already have an in-flight or completed
+    // promise for it, return its result so both players see the same verdict.
+    if (typeof gameId === 'string' && gameId.length > 0) {
+      const cached = judgeCache.get(gameId);
+      if (cached && cached.expiresAt > Date.now()) {
+        try {
+          const result = await cached.promise;
+          return res.json(result);
+        } catch (err) {
+          // Fall through and try a fresh Sonar call below.
+          console.error('[judge] cached promise failed, retrying:', err.message);
+          judgeCache.delete(gameId);
+        }
+      }
+    }
 
-    const userPrompt =
-      `Topic: ${topic}\n` +
-      `Debate Question: ${question}\n\n` +
-      `Transcript:\n${transcript}`;
+    const promise = callSonar(apiKey, topic, question, safeMessages);
+
+    if (typeof gameId === 'string' && gameId.length > 0) {
+      judgeCache.set(gameId, { promise, expiresAt: Date.now() + CACHE_TTL_MS });
+    }
 
     try {
-      const upstream = await fetch(PERPLEXITY_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: MODEL,
-          temperature: 0.2,
-          max_tokens: 500,
-          search_recency_filter: 'month',
-          messages: [
-            { role: 'system', content: buildSystemPrompt(todayHuman) },
-            { role: 'user', content: userPrompt },
-          ],
-        }),
-      });
-
-      if (!upstream.ok) {
-        const errText = await upstream.text().catch(() => '');
-        console.error(`[judge] Perplexity ${upstream.status}: ${errText}`);
-        return res.status(502).json({ error: 'Upstream judge service failed' });
-      }
-
-      const data = await upstream.json();
-      const content = data?.choices?.[0]?.message?.content || '';
-      const sources = Array.isArray(data?.citations) ? data.citations : [];
-
-      const parsed = parseJudgeReply(content);
-      return res.json({ ...parsed, sources });
+      const result = await promise;
+      return res.json(result);
     } catch (err) {
+      const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
       console.error('[judge] error:', err.message);
-      return res.status(500).json({ error: 'Judge failed' });
+      // Drop the failed cache entry so the next caller can retry.
+      if (gameId) judgeCache.delete(gameId);
+      return res.status(status).json({ error: 'Judge failed' });
     }
   });
 
