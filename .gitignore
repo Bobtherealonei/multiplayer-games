@@ -1,0 +1,11 @@
+# Node
+node_modules/
+package-lock.json
+npm-debug.log*
+
+# Local env (NEVER commit secrets)
+.env
+.env.local
+
+# OS
+.DS_Store
