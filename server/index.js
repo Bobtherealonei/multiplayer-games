@@ -1,10 +1,18 @@
 const express = require('express');
 const http = require('http');
+const cors = require('cors');
 const { Server } = require('socket.io');
 const GameManager = require('./gameManager');
 const Matchmaking = require('./matchmaking');
+const factCheckRoute = require('./factcheck');
+const coachRoute = require('./coach');
 
 const app = express();
+
+// HTTP middleware (used by /factcheck and /coach — Socket.IO has its own CORS).
+app.use(cors());
+app.use(express.json({ limit: '256kb' }));
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -17,10 +25,14 @@ const io = new Server(server, {
 const gameManager = new GameManager(io);
 const matchmaking = new Matchmaking(gameManager);
 
-// No web UI — iOS only. Socket.IO handles all client connections.
+// Health check.
 app.get('/', (req, res) => {
   res.status(200).send('OK');
 });
+
+// LLM proxy routes (keys live only in Render env vars).
+app.use(factCheckRoute.makeRouter());
+app.use(coachRoute.makeRouter());
 
 // Store user ID mapping: socket.id -> userId
 const socketToUserId = new Map();
