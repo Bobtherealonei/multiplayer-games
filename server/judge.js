@@ -9,13 +9,18 @@ const express = require('express');
 const PERPLEXITY_URL = 'https://api.perplexity.ai/chat/completions';
 const MODEL = 'sonar';
 
-function buildSystemPrompt(todayHuman) {
-  return `You are an impartial AI debate judge. Two anonymous players (Player X and Player O) just had a short debate. Today is ${todayHuman}. You have access to the live web — use it to spot-check any factual claims.
+function buildSystemPrompt(todayHuman, nameX, nameO) {
+  return `You are an impartial AI debate judge. Two players just had a short debate: ${nameX} and ${nameO}. Today is ${todayHuman}. You have access to the live web — use it to spot-check any factual claims.
+
+In your scoring output:
+- "ScoreX" is ${nameX}'s score.
+- "ScoreO" is ${nameO}'s score.
+In your written review, refer to the players by name (${nameX} and ${nameO}). Do NOT call them "Player X", "Player O", "Player 1", or "Player 2".
 
 YOUR TASK
 1. Read the full transcript carefully.
 2. Score each player independently from 0 to 10 using the scale below.
-3. Write a 2-4 sentence review explaining the scores. Quote or paraphrase the strongest specific argument from each side that actually contributed. If a player was silent or hostile, say so plainly. Do not share your personal opinion on the topic.
+3. Write a 2-4 sentence review explaining the scores using the players' names. Quote or paraphrase the strongest specific argument from each side that actually contributed. If a player was silent or hostile, say so plainly. Do not share your personal opinion on the topic.
 
 You do NOT pick the winner. The application code will compare the two scores numerically — your only job is to set them honestly.
 
@@ -93,11 +98,22 @@ function pruneCache() {
   }
 }
 
-async function callSonar(apiKey, topic, question, safeMessages) {
+function sanitizeName(raw, fallback) {
+  if (typeof raw !== 'string') return fallback;
+  // Strip newlines so a name can't break out of the prompt structure, trim,
+  // and cap length to a reasonable display size.
+  const cleaned = raw.replace(/[\r\n\t]+/g, ' ').trim().slice(0, 60);
+  return cleaned.length > 0 ? cleaned : fallback;
+}
+
+async function callSonar(apiKey, topic, question, safeMessages, names) {
+  const nameX = names.X;
+  const nameO = names.O;
+
   const transcript = safeMessages
     .map((m) => {
-      const label = m.player === 'O' ? 'O' : 'X';
-      return `[Player ${label}]: ${m.text.trim()}`;
+      const label = m.player === 'O' ? nameO : nameX;
+      return `[${label}]: ${m.text.trim()}`;
     })
     .join('\n');
 
@@ -112,6 +128,7 @@ async function callSonar(apiKey, topic, question, safeMessages) {
   const userPrompt =
     `Topic: ${topic}\n` +
     `Debate Question: ${question}\n\n` +
+    `The two debaters are ${nameX} (their score = ScoreX) and ${nameO} (their score = ScoreO).\n\n` +
     `Transcript:\n${transcript}`;
 
   const upstream = await fetch(PERPLEXITY_URL, {
@@ -126,7 +143,7 @@ async function callSonar(apiKey, topic, question, safeMessages) {
       max_tokens: 500,
       search_recency_filter: 'month',
       messages: [
-        { role: 'system', content: buildSystemPrompt(todayHuman) },
+        { role: 'system', content: buildSystemPrompt(todayHuman, nameX, nameO) },
         { role: 'user', content: userPrompt },
       ],
     }),
@@ -156,10 +173,21 @@ function makeRouter() {
       return res.status(500).json({ error: 'Server misconfigured: PERPLEXITY_API_KEY not set' });
     }
 
-    const { topic = '', question = '', messages = [], gameId = '' } = req.body || {};
+    const {
+      topic = '',
+      question = '',
+      messages = [],
+      gameId = '',
+      playerNames: rawNames = {},
+    } = req.body || {};
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'messages must be an array' });
     }
+
+    const names = {
+      X: sanitizeName(rawNames && rawNames.X, 'Player 1'),
+      O: sanitizeName(rawNames && rawNames.O, 'Player 2'),
+    };
 
     const MAX_MESSAGES = 80;
     const safeMessages = messages
@@ -194,7 +222,7 @@ function makeRouter() {
       }
     }
 
-    const promise = callSonar(apiKey, topic, question, safeMessages);
+    const promise = callSonar(apiKey, topic, question, safeMessages, names);
 
     if (typeof gameId === 'string' && gameId.length > 0) {
       judgeCache.set(gameId, { promise, expiresAt: Date.now() + CACHE_TTL_MS });
