@@ -42,7 +42,7 @@ io.on('connection', (socket) => {
   console.log(`Player connected: socket.id=${socket.id}, userId=${userId}`);
 
   socket.on('findMatch', (data) => {
-    const gameType = data?.gameType || 'ticTacToe'; // Default to ticTacToe for backward compatibility
+    const gameType = data?.gameType || 'religion'; // Default to "Trending in the USA"
     matchmaking.addPlayer(socket, gameType, userId);
   });
 

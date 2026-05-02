@@ -1,10 +1,3 @@
-const TicTacToe = require('./ticTacToe');
-const Battleship = require('./battleship');
-const RockPaperScissors = require('./rockPaperScissors');
-const BalloonPump = require('./balloonPump');
-const Mines = require('./mines');
-const TwoTruthsAndALie = require('./twoTruthsAndALie');
-const Pool = require('./pool');
 const TopicDebate = require('./topicDebate');
 
 class GameManager {
@@ -13,13 +6,8 @@ class GameManager {
     this.games = new Map();
     this.playerToGame = new Map();
     this.gameFactories = new Map();
-    this.registerGameType('ticTacToe', TicTacToe);
-    this.registerGameType('twoTruthsAndALie', TwoTruthsAndALie);
-    this.registerGameType('battleship', Battleship);
-    this.registerGameType('rockPaperScissors', RockPaperScissors);
-    this.registerGameType('balloonPump', BalloonPump);
-    this.registerGameType('mines', Mines);
-    this.registerGameType('pool', Pool);
+    // All "game types" are debate topics — the legacy 'religion' key is the
+    // Trending in the USA slot.
     this.registerGameType('religion', TopicDebate);
     this.registerGameType('aiFuture', TopicDebate);
     this.registerGameType('currentPolitics', TopicDebate);
@@ -40,7 +28,7 @@ class GameManager {
    * Create a game instance based on gameType
    * @param {Object} player1 - First player
    * @param {Object} player2 - Second player
-   * @param {string} gameType - Type of game to create (e.g., 'ticTacToe')
+   * @param {string} gameType - Debate topic key (e.g., 'religion', 'aiFuture')
    */
   createGame(player1, player2, gameType) {
     // Get the game class for this gameType
@@ -74,36 +62,22 @@ class GameManager {
     this.playerToGame.set(player1.id, gameId);
     this.playerToGame.set(player2.id, gameId);
 
-    // Get initial state for game-specific properties
-    const initialState = game.getState();
-    
     // Notify both players with Firebase user IDs
-    const gameFoundData = {
+    player1.socket.emit('gameFound', {
       gameId: gameId,
       symbol: initResult.player1.symbol,
-      opponentUid: player2.id,  // Firebase user ID
-      opponent: player2.id,      // Keep for backward compatibility
+      opponentUid: player2.id,
+      opponent: player2.id,      // legacy field, kept for backward compatibility
       gameType: gameType
-    };
-    
-    // Add game-specific properties if they exist
-    if (initialState.rows) gameFoundData.rows = initialState.rows;
-    if (initialState.cols) gameFoundData.cols = initialState.cols;
-    
-    player1.socket.emit('gameFound', gameFoundData);
+    });
 
-    const gameFoundData2 = {
+    player2.socket.emit('gameFound', {
       gameId: gameId,
       symbol: initResult.player2.symbol,
-      opponentUid: player1.id,  // Firebase user ID
-      opponent: player1.id,      // Keep for backward compatibility
+      opponentUid: player1.id,
+      opponent: player1.id,      // legacy field, kept for backward compatibility
       gameType: gameType
-    };
-    
-    if (initialState.rows) gameFoundData2.rows = initialState.rows;
-    if (initialState.cols) gameFoundData2.cols = initialState.cols;
-    
-    player2.socket.emit('gameFound', gameFoundData2);
+    });
 
     // Send initial game state
     this.sendGameState(gameId);
@@ -157,34 +131,17 @@ class GameManager {
 
   sendGameState(gameId) {
     const gameData = this.games.get(gameId);
-    if (!gameData) {
-      return;
-    }
+    if (!gameData) return;
 
-    const state = gameData.game.getState();
     const gameState = {
-      board: state.board,
-      currentPlayer: state.currentPlayer,
-      winner: state.winner,
-      isDraw: state.isDraw,
       player1Symbol: gameData.player1.symbol,
       player2Symbol: gameData.player2.symbol,
-      rows: state.rows,
-      cols: state.cols,
       gameType: gameData.game.gameType,
-      ...state
+      ...gameData.game.getState()
     };
 
-    // Send to both players
     gameData.player1.socket.emit('gameState', gameState);
     gameData.player2.socket.emit('gameState', gameState);
-
-    // If game is over, clean up after a delay
-    if (gameData.game.isFinished()) {
-      setTimeout(() => {
-        this.endGame(gameId);
-      }, 5000);
-    }
   }
 
   endGame(gameId) {
