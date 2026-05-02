@@ -7,6 +7,13 @@
 //
 // Per-user dedup: users/{uid}.seenDebateQuestions is an array of question IDs
 //   (doc IDs from `newsItems`). We use arrayUnion to append after each match.
+//
+// State model (since the refactor to support multi-instance scaling):
+//   The class instance is now EPHEMERAL — game state lives in Redis and the
+//   instance is rehydrated on demand via fromState(). That lets any
+//   game-server instance load a game, mutate it, save it back, and broadcast
+//   an update through the Socket.IO redis-adapter, regardless of which
+//   instance the players are connected to.
 
 const Game = require('./game');
 const { getDb, getAdmin } = require('./firestoreClient');
@@ -24,6 +31,10 @@ const FALLBACK_QUESTIONS = [
   'Is the government handling the economy the right way?'
 ];
 
+// In-memory per-instance cache of trending questions. Each instance does its
+// own refresh; that's a few extra Firestore reads per instance per minute,
+// which is negligible. Sharing this cache via Redis would be more code for
+// no real win.
 const trendingCache = {
   items: [],
   updatedAt: 0,
@@ -215,7 +226,14 @@ async function pickTrendingQuestion(playerIds) {
 class TopicDebate extends Game {
   constructor() {
     super();
-    this.playerSymbols = new Map();
+    // All instance fields below are populated either by createGame() (fresh
+    // game) or fromState() (rehydration from Redis on a different instance).
+    this.gameId = null;
+    this.gameType = TRENDING_GAME_TYPE;
+    this.player1Id = null;
+    this.player2Id = null;
+    this.player1Symbol = 'P1';
+    this.player2Symbol = 'P2';
     this.phase = 'debating';
     this.topicKey = TRENDING_GAME_TYPE;
     this.topicTitle = TRENDING_USA_TITLE;
@@ -223,14 +241,20 @@ class TopicDebate extends Game {
     this.matchRequests = { P1: false, P2: false };
     this.winner = null;
     this.isDraw = false;
+    this.createdAt = null;
     ensureFreshCache();
   }
 
+  // Initialise a fresh game from a pair of player IDs. Caller still has to
+  // persist the result via gameStore.saveGameState().
   createGame(players) {
-    if (players.length !== 2) throw new Error('TopicDebate requires exactly 2 players');
-    this.players = players;
-    this.playerSymbols.set(players[0].id, 'P1');
-    this.playerSymbols.set(players[1].id, 'P2');
+    if (!Array.isArray(players) || players.length !== 2) {
+      throw new Error('TopicDebate requires exactly 2 players');
+    }
+    this.player1Id = players[0].id;
+    this.player2Id = players[1].id;
+    this.player1Symbol = 'P1';
+    this.player2Symbol = 'P2';
     this.phase = 'debating';
     this.matchRequests = { P1: false, P2: false };
     this.winner = null;
@@ -238,7 +262,6 @@ class TopicDebate extends Game {
     this.createdAt = Date.now();
 
     const isTrending = (this.gameType || TRENDING_GAME_TYPE) === TRENDING_GAME_TYPE;
-
     if (!isTrending) {
       const selected = randomStaticQuestion(this.gameType);
       if (selected) {
@@ -250,43 +273,26 @@ class TopicDebate extends Game {
       this.topicKey = TRENDING_GAME_TYPE;
       this.topicTitle = TRENDING_USA_TITLE;
       this.question = 'Finding a fresh debate topic...';
-
-      const playerIds = [players[0].id, players[1].id];
-      pickTrendingQuestion(playerIds)
-        .then(async (selected) => {
-          this.question = selected.question;
-          const db = getDb();
-          if (db && selected.questionId) {
-            await recordSeen(db, playerIds, selected.questionId);
-          }
-          this._broadcastState();
-        })
-        .catch((err) => {
-          console.error('[TopicDebate] pickTrendingQuestion failed:', err.message);
-          this.question = FALLBACK_QUESTIONS[Math.floor(Math.random() * FALLBACK_QUESTIONS.length)];
-          this._broadcastState();
-        });
+      // Async trending fetch + broadcast is handled by gameManager so the
+      // class itself stays free of Socket.IO references — that's what makes
+      // it safely rehydratable on any instance.
     }
 
     return {
       success: true,
-      player1: { id: players[0].id, symbol: 'P1' },
-      player2: { id: players[1].id, symbol: 'P2' }
+      player1: { id: this.player1Id, symbol: this.player1Symbol },
+      player2: { id: this.player2Id, symbol: this.player2Symbol }
     };
   }
 
-  _broadcastState() {
-    if (!this.players) return;
-    const state = this.getState();
-    for (const p of this.players) {
-      if (p && p.socket) {
-        try { p.socket.emit('gameState', state); } catch (_) { /* ignore */ }
-      }
-    }
+  symbolFor(playerId) {
+    if (playerId === this.player1Id) return this.player1Symbol;
+    if (playerId === this.player2Id) return this.player2Symbol;
+    return null;
   }
 
   makeMove(playerId, move) {
-    const sym = this.playerSymbols.get(playerId);
+    const sym = this.symbolFor(playerId);
     if (!sym) return { success: false, error: 'Player not in this debate' };
     if (move && typeof move.readyToMatch === 'boolean') {
       this.matchRequests[sym] = move.readyToMatch;
@@ -296,6 +302,7 @@ class TopicDebate extends Game {
     return { success: false, error: 'Invalid debate action' };
   }
 
+  // Public wire format sent to clients on every gameState event.
   getState() {
     return {
       board: [[this.question]],
@@ -316,15 +323,62 @@ class TopicDebate extends Game {
 
   cleanup() {
     super.cleanup();
-    this.playerSymbols.clear();
     this.phase = 'debating';
     this.question = '';
     this.matchRequests = { P1: false, P2: false };
     this.winner = null;
     this.isDraw = false;
   }
+
+  // ── Persistence helpers ──────────────────────────────────────────────
+  // Plain-object snapshot suitable for HSET into Redis. Anything that needs
+  // to round-trip through gameStore.saveGameState() must live here.
+  serialize() {
+    return {
+      gameId: this.gameId,
+      gameType: this.gameType,
+      player1Id: this.player1Id,
+      player2Id: this.player2Id,
+      player1Symbol: this.player1Symbol,
+      player2Symbol: this.player2Symbol,
+      phase: this.phase,
+      topicKey: this.topicKey,
+      topicTitle: this.topicTitle,
+      question: this.question,
+      matchRequests: this.matchRequests,
+      winner: this.winner,
+      isDraw: this.isDraw,
+      createdAt: this.createdAt
+    };
+  }
+
+  // Mirror of serialize(): inflate from whatever gameStore.loadGameState()
+  // produced. Tolerates partial state (missing fields fall back to
+  // constructor defaults) so we don't blow up on a half-written game.
+  fromState(state) {
+    if (!state) return this;
+    this.gameId = state.gameId ?? this.gameId;
+    this.gameType = state.gameType ?? this.gameType;
+    this.player1Id = state.player1Id ?? null;
+    this.player2Id = state.player2Id ?? null;
+    this.player1Symbol = state.player1Symbol ?? 'P1';
+    this.player2Symbol = state.player2Symbol ?? 'P2';
+    this.phase = state.phase ?? 'debating';
+    this.topicKey = state.topicKey ?? TRENDING_GAME_TYPE;
+    this.topicTitle = state.topicTitle ?? TRENDING_USA_TITLE;
+    this.question = state.question ?? 'Finding a fresh debate topic...';
+    this.matchRequests = state.matchRequests ?? { P1: false, P2: false };
+    this.winner = state.winner ?? null;
+    this.isDraw = state.isDraw ?? false;
+    this.createdAt = state.createdAt ?? null;
+    return this;
+  }
 }
 
 ensureFreshCache();
 
 module.exports = TopicDebate;
+module.exports.pickTrendingQuestion = pickTrendingQuestion;
+module.exports.recordSeen = recordSeen;
+module.exports.TRENDING_GAME_TYPE = TRENDING_GAME_TYPE;
+module.exports.FALLBACK_QUESTIONS = FALLBACK_QUESTIONS;

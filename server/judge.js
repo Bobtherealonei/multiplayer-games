@@ -3,8 +3,21 @@
 // iOS POSTs the full transcript with player labels (X / O); we ask Sonar to
 // evaluate argument quality + factual accuracy and return:
 //   { winner: "X"|"O"|"tie", scoreX: 0-10, scoreO: 0-10, review: "...", sources: [] }
+//
+// Cross-instance single-flight (Redis):
+//   Both players hit /judge ~simultaneously. Without coordination, two
+//   instances would each call Perplexity (double cost) and produce two
+//   different reviews (bad UX — the players see different verdicts).
+//   The pattern below uses a Redis lock + result key:
+//     1. GET judge:{gameId}        — cached? return it.
+//     2. SET judge-lock:{gameId} NX EX 60 — got the lock? do the call,
+//                                          write the result, release lock.
+//     3. Lost the lock?            — poll judge:{gameId} until the leader
+//                                    publishes (up to ~25s, well under
+//                                    the iOS request timeout).
 
 const express = require('express');
+const store = require('./gameStore');
 
 const PERPLEXITY_URL = 'https://api.perplexity.ai/chat/completions';
 const MODEL = 'sonar';
@@ -78,24 +91,19 @@ function parseJudgeReply(content) {
   return { winner, scoreX, scoreO, review };
 }
 
-// In-memory cache: gameId -> { promise: Promise<result>, expiresAt: number }.
-// Both players in a debate POST /judge with the same gameId; the first caller
-// kicks off the Sonar request, the second caller awaits the same Promise — so
-// both players see the identical verdict and Sonar is only charged once.
-const judgeCache = new Map();
-const CACHE_TTL_MS = 10 * 60 * 1000;     // 10 minutes
-const MAX_CACHE_ENTRIES = 500;           // safety cap
+// How long the loser-of-the-lock will poll for the winner's published
+// result before giving up. Total = POLL_INTERVAL_MS * MAX_POLLS. Keep
+// comfortably under whatever timeout the iOS client uses for /judge.
+const POLL_INTERVAL_MS = 500;
+const MAX_POLLS = 50; // 25 seconds
 
-function pruneCache() {
-  const now = Date.now();
-  for (const [key, entry] of judgeCache) {
-    if (entry.expiresAt <= now) judgeCache.delete(key);
+async function waitForCachedResult(gameId) {
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const cached = await store.getJudgeResult(gameId);
+    if (cached) return cached;
   }
-  // Hard cap (drop oldest by insertion order — Map preserves order).
-  while (judgeCache.size > MAX_CACHE_ENTRIES) {
-    const oldest = judgeCache.keys().next().value;
-    judgeCache.delete(oldest);
-  }
+  return null;
 }
 
 function sanitizeName(raw, fallback) {
@@ -204,40 +212,47 @@ function makeRouter() {
       });
     }
 
-    pruneCache();
-
-    // If a gameId is provided and we already have an in-flight or completed
-    // promise for it, return its result so both players see the same verdict.
-    if (typeof gameId === 'string' && gameId.length > 0) {
-      const cached = judgeCache.get(gameId);
-      if (cached && cached.expiresAt > Date.now()) {
-        try {
-          const result = await cached.promise;
-          return res.json(result);
-        } catch (err) {
-          // Fall through and try a fresh Sonar call below.
-          console.error('[judge] cached promise failed, retrying:', err.message);
-          judgeCache.delete(gameId);
-        }
+    // No gameId? Fall back to per-call execution (no de-duplication
+    // possible). This branch is mostly for safety — iOS always sends one.
+    if (typeof gameId !== 'string' || gameId.length === 0) {
+      try {
+        const result = await callSonar(apiKey, topic, question, safeMessages, names);
+        return res.json(result);
+      } catch (err) {
+        const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
+        console.error('[judge] error:', err.message);
+        return res.status(status).json({ error: 'Judge failed' });
       }
     }
 
-    const promise = callSonar(apiKey, topic, question, safeMessages, names);
+    // Step 1: cached?
+    const cached = await store.getJudgeResult(gameId);
+    if (cached) return res.json(cached);
 
-    if (typeof gameId === 'string' && gameId.length > 0) {
-      judgeCache.set(gameId, { promise, expiresAt: Date.now() + CACHE_TTL_MS });
+    // Step 2: try to be the leader for this gameId.
+    const gotLock = await store.tryAcquireJudgeLock(gameId);
+    if (gotLock) {
+      try {
+        const result = await callSonar(apiKey, topic, question, safeMessages, names);
+        await store.setJudgeResult(gameId, result);
+        return res.json(result);
+      } catch (err) {
+        const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
+        console.error('[judge] error:', err.message);
+        return res.status(status).json({ error: 'Judge failed' });
+      } finally {
+        // Release ASAP so a retry after a failure doesn't have to wait
+        // out the lock TTL.
+        await store.releaseJudgeLock(gameId);
+      }
     }
 
-    try {
-      const result = await promise;
-      return res.json(result);
-    } catch (err) {
-      const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
-      console.error('[judge] error:', err.message);
-      // Drop the failed cache entry so the next caller can retry.
-      if (gameId) judgeCache.delete(gameId);
-      return res.status(status).json({ error: 'Judge failed' });
-    }
+    // Step 3: someone else is computing — wait for their result.
+    const result = await waitForCachedResult(gameId);
+    if (result) return res.json(result);
+
+    console.warn(`[judge] timed out waiting for cached result for gameId=${gameId}`);
+    return res.status(504).json({ error: 'Judge timed out' });
   });
 
   return router;

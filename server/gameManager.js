@@ -1,24 +1,39 @@
-const TopicDebate = require('./topicDebate');
+// gameManager.js — orchestrates the lifecycle of a debate game.
+//
+// Multi-instance design:
+//   - All cluster-shared state lives in Redis (see gameStore.js for the
+//     schema). The class instance you see below is just a thin facade that
+//     loads-on-demand, mutates, then writes back.
+//   - All outbound socket emits go through Socket.IO rooms instead of
+//     direct socket references, so they get routed across instances by the
+//     redis-adapter wired in index.js. The two rooms in play:
+//         user:{userId}   — every connected socket for that user
+//         game:{gameId}   — both players currently in the game
+//   - pendingDisconnects is intentionally kept LOCAL to each instance.
+//     When the timer fires we ask the redis-adapter for live sockets in
+//     the user's room across the whole cluster (fetchSockets); if any are
+//     present, we know they reconnected (possibly to a different instance)
+//     and we bail. If the instance that scheduled the timer dies, the
+//     1h game-key TTL eventually evicts the orphaned game — acceptable.
 
-// How long we wait after a socket drops before declaring the player gone for
-// good. Socket.IO Swift auto-reconnects with a short backoff, so most transient
-// blips (app backgrounding, WiFi→cellular handover, brief packet loss) are
-// resolved well within this window. Without this grace period the OTHER player
-// gets kicked with "Player has disconnected" any time their opponent's phone
-// briefly drops the connection.
+const TopicDebate = require('./topicDebate');
+const { pickTrendingQuestion, recordSeen, TRENDING_GAME_TYPE, FALLBACK_QUESTIONS } = TopicDebate;
+const { getDb } = require('./firestoreClient');
+const store = require('./gameStore');
+
 const RECONNECT_GRACE_MS = 12000;
+
+function userRoom(userId) { return `user:${userId}`; }
+function gameRoom(gameId) { return `game:${gameId}`; }
 
 class GameManager {
   constructor(io) {
     this.io = io;
-    this.games = new Map();
-    this.playerToGame = new Map();
     this.gameFactories = new Map();
-    // userId -> setTimeout handle for a pending "your opponent disconnected"
-    // notification. Cancelled if the player reconnects within the grace window.
+    // userId -> setTimeout handle. LOCAL ONLY, see file header.
     this.pendingDisconnects = new Map();
-    // All "game types" are debate topics — the legacy 'religion' key is the
-    // Trending in the USA slot.
+    // Every "game type" the iOS client knows is a debate topic. The legacy
+    // 'religion' key is the Trending in the USA slot.
     this.registerGameType('religion', TopicDebate);
     this.registerGameType('aiFuture', TopicDebate);
     this.registerGameType('currentPolitics', TopicDebate);
@@ -26,228 +41,292 @@ class GameManager {
     this.registerGameType('sportsDebate', TopicDebate);
   }
 
-  /**
-   * Register a game type with its class
-   * @param {string} gameType - The game type identifier
-   * @param {Class} GameClass - The game class that extends Game
-   */
   registerGameType(gameType, GameClass) {
     this.gameFactories.set(gameType, GameClass);
   }
 
-  /**
-   * Create a game instance based on gameType
-   * @param {Object} player1 - First player
-   * @param {Object} player2 - Second player
-   * @param {string} gameType - Debate topic key (e.g., 'religion', 'aiFuture')
-   */
-  createGame(player1, player2, gameType) {
-    // Get the game class for this gameType
-    const GameClass = this.gameFactories.get(gameType);
-    if (!GameClass) {
-      throw new Error(`Unknown game type: ${gameType}`);
+  // Hydrate a game class instance from its serialised Redis form.
+  _hydrate(state) {
+    if (!state || !state.gameType) return null;
+    const GameClass = this.gameFactories.get(state.gameType);
+    if (!GameClass) return null;
+    const game = new GameClass();
+    game.gameType = state.gameType;
+    game.gameId = state.gameId;
+    game.fromState(state);
+    return game;
+  }
+
+  // Both players in the game must be in the `game:{gameId}` room for emits
+  // to reach them. We re-add each user's currently-connected sockets across
+  // the cluster — fetchSockets() goes through the redis-adapter so it sees
+  // sockets on other instances too.
+  async _joinPlayersToGameRoom(gameId, player1Id, player2Id) {
+    for (const uid of [player1Id, player2Id]) {
+      try {
+        const sockets = await this.io.in(userRoom(uid)).fetchSockets();
+        for (const s of sockets) {
+          await s.join(gameRoom(gameId));
+        }
+      } catch (err) {
+        console.error(`[gameManager] failed to join ${uid} to ${gameRoom(gameId)}:`, err.message);
+      }
     }
+  }
+
+  // Counter-part: pull both players out of the game room when it ends.
+  async _removePlayersFromGameRoom(gameId, player1Id, player2Id) {
+    for (const uid of [player1Id, player2Id]) {
+      try {
+        const sockets = await this.io.in(userRoom(uid)).fetchSockets();
+        for (const s of sockets) {
+          await s.leave(gameRoom(gameId));
+        }
+      } catch (err) {
+        console.error(`[gameManager] failed to remove ${uid} from ${gameRoom(gameId)}:`, err.message);
+      }
+    }
+  }
+
+  // Caller (matchmaking) has already popped two userIds out of the queue.
+  // We don't need socket references — we emit through rooms.
+  async createGame(player1Id, player2Id, gameType) {
+    const GameClass = this.gameFactories.get(gameType);
+    if (!GameClass) throw new Error(`Unknown game type: ${gameType}`);
 
     const gameId = `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const game = new GameClass();
     game.gameId = gameId;
     game.gameType = gameType;
-    
-    // Create game with players using the standard interface
-    const players = [
-      { id: player1.id, socket: player1.socket },
-      { id: player2.id, socket: player2.socket }
-    ];
-    
-    const initResult = game.createGame(players);
-    
-    // Store game data
-    const gameData = {
-      id: gameId,
-      game: game,
-      player1: { id: player1.id, socket: player1.socket, symbol: initResult.player1.symbol },
-      player2: { id: player2.id, socket: player2.socket, symbol: initResult.player2.symbol }
-    };
 
-    this.games.set(gameId, gameData);
-    this.playerToGame.set(player1.id, gameId);
-    this.playerToGame.set(player2.id, gameId);
+    const initResult = game.createGame([
+      { id: player1Id },
+      { id: player2Id }
+    ]);
 
-    // Notify both players with Firebase user IDs
-    player1.socket.emit('gameFound', {
-      gameId: gameId,
+    // Persist initial state + bind both players to this game.
+    await store.saveGameState(gameId, game.serialize());
+    await Promise.all([
+      store.setPlayerGame(player1Id, gameId),
+      store.setPlayerGame(player2Id, gameId)
+    ]);
+
+    await this._joinPlayersToGameRoom(gameId, player1Id, player2Id);
+
+    // Dispatch the per-user `gameFound` events. Each player needs to know
+    // their own symbol AND the opponent's id, which is asymmetric, so we
+    // emit twice — once per user room.
+    this.io.to(userRoom(player1Id)).emit('gameFound', {
+      gameId,
       symbol: initResult.player1.symbol,
-      opponentUid: player2.id,
-      opponent: player2.id,      // legacy field, kept for backward compatibility
-      gameType: gameType
+      opponentUid: player2Id,
+      opponent: player2Id, // legacy
+      gameType
     });
-
-    player2.socket.emit('gameFound', {
-      gameId: gameId,
+    this.io.to(userRoom(player2Id)).emit('gameFound', {
+      gameId,
       symbol: initResult.player2.symbol,
-      opponentUid: player1.id,
-      opponent: player1.id,      // legacy field, kept for backward compatibility
-      gameType: gameType
+      opponentUid: player1Id,
+      opponent: player1Id, // legacy
+      gameType
     });
 
-    // Send initial game state
-    this.sendGameState(gameId);
+    await this.sendGameState(gameId, game);
 
-    console.log(`Game created: ${gameId} between ${player1.id} and ${player2.id}`);
+    console.log(`Game created: ${gameId} between ${player1Id} and ${player2Id}`);
+
+    // Trending topic? Kick off the live-news fetch and broadcast the real
+    // question once it's resolved. We do this AFTER createGame returns so
+    // the players see the placeholder immediately and the real topic
+    // arrives shortly. Self-contained — any instance can be the one to
+    // resolve it because the state lives in Redis.
+    if (gameType === TRENDING_GAME_TYPE) {
+      this._resolveTrendingQuestion(gameId, player1Id, player2Id).catch((err) => {
+        console.error('[gameManager] _resolveTrendingQuestion failed:', err.message);
+      });
+    }
+
+    return gameId;
   }
 
-  handleMove(playerId, data) {
-    const gameId = this.playerToGame.get(playerId);
-    if (!gameId) {
-      return;
+  async _resolveTrendingQuestion(gameId, player1Id, player2Id) {
+    let chosen;
+    try {
+      chosen = await pickTrendingQuestion([player1Id, player2Id]);
+    } catch (err) {
+      console.error('[gameManager] pickTrendingQuestion failed:', err.message);
+      chosen = {
+        question: FALLBACK_QUESTIONS[Math.floor(Math.random() * FALLBACK_QUESTIONS.length)],
+        questionId: null
+      };
     }
 
-    const gameData = this.games.get(gameId);
-    if (!gameData) {
-      return;
+    // Game might have ended while we were waiting on the network round-trip.
+    const state = await store.loadGameState(gameId);
+    if (!state) return;
+
+    await store.patchGameState(gameId, { question: chosen.question });
+
+    const db = getDb();
+    if (db && chosen.questionId) {
+      try {
+        await recordSeen(db, [player1Id, player2Id], chosen.questionId);
+      } catch (err) {
+        console.warn('[gameManager] recordSeen failed:', err.message);
+      }
     }
 
-    const player = gameData.player1.id === playerId ? gameData.player1 : gameData.player2;
-    
-    // Use the standard interface: makeMove(playerId, move)
-    const result = gameData.game.makeMove(playerId, data);
-
-    if (result.success) {
-      this.sendGameState(gameId);
-    } else {
-      player.socket.emit('moveError', { error: result.error });
-    }
+    // Broadcast updated state to both players via the game room.
+    const updated = await store.loadGameState(gameId);
+    if (!updated) return;
+    const game = this._hydrate(updated);
+    if (game) await this.sendGameState(gameId, game);
   }
 
-  // ✅ Chat relay (send only to receiver)
-  handleChat(playerId, payload) {
-    const gameId = payload?.gameId || this.playerToGame.get(playerId);
+  async handleMove(playerId, data) {
+    const gameId = await store.getPlayerGame(playerId);
     if (!gameId) return;
+    const state = await store.loadGameState(gameId);
+    if (!state) return;
+    const game = this._hydrate(state);
+    if (!game) return;
 
-    const gameData = this.games.get(gameId);
-    if (!gameData) return;
+    const result = game.makeMove(playerId, data);
+    if (result.success) {
+      await store.saveGameState(gameId, game.serialize());
+      await this.sendGameState(gameId, game);
+    } else {
+      // moveError is per-user feedback, not a broadcast.
+      this.io.to(userRoom(playerId)).emit('moveError', { error: result.error });
+    }
+  }
 
-    const receiver = gameData.player1.id === playerId ? gameData.player2 : gameData.player1;
+  // Chat: relay only to the OTHER player. Game room minus sender.
+  async handleChat(playerId, payload) {
+    const gameId = payload?.gameId || (await store.getPlayerGame(playerId));
+    if (!gameId) return;
+    const state = await store.loadGameState(gameId);
+    if (!state) return;
 
-    const messagePayload = {
+    const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+    if (!otherId) return;
+
+    this.io.to(userRoom(otherId)).emit('chatMessage', {
       message: payload?.message,
       sender: payload?.sender,
       symbol: payload?.symbol,
-      gameId: gameId,
-      playerId: playerId
-    };
-
-    receiver.socket.emit('chatMessage', messagePayload);
+      gameId,
+      playerId
+    });
   }
 
-  sendGameState(gameId) {
-    const gameData = this.games.get(gameId);
-    if (!gameData) return;
-
-    const gameState = {
-      player1Symbol: gameData.player1.symbol,
-      player2Symbol: gameData.player2.symbol,
-      gameType: gameData.game.gameType,
-      ...gameData.game.getState()
+  // Caller may already have a hydrated game instance (saves a Redis read).
+  async sendGameState(gameId, gameInstance) {
+    let game = gameInstance;
+    if (!game) {
+      const state = await store.loadGameState(gameId);
+      if (!state) return;
+      game = this._hydrate(state);
+      if (!game) return;
+    }
+    const payload = {
+      player1Symbol: game.player1Symbol,
+      player2Symbol: game.player2Symbol,
+      gameType: game.gameType,
+      ...game.getState()
     };
-
-    gameData.player1.socket.emit('gameState', gameState);
-    gameData.player2.socket.emit('gameState', gameState);
+    this.io.to(gameRoom(gameId)).emit('gameState', payload);
   }
 
-  endGame(gameId) {
-    const gameData = this.games.get(gameId);
-    if (gameData) {
-      // Use the standard cleanup interface
-      gameData.game.cleanup();
+  // Tear down a game everywhere: Redis state, room membership, pending
+  // disconnect timers on THIS instance. Cross-instance pending timers
+  // self-heal — when they fire, they'll see no game in Redis and bail.
+  async endGame(gameId) {
+    const state = await store.loadGameState(gameId);
+    if (!state) return;
+    const { player1Id, player2Id } = state;
 
-      // Cancel any pending grace-period timers so they don't fire against a
-      // game that no longer exists (avoids both a no-op log line and a leak).
-      for (const playerId of [gameData.player1.id, gameData.player2.id]) {
-        const t = this.pendingDisconnects.get(playerId);
-        if (t) {
-          clearTimeout(t);
-          this.pendingDisconnects.delete(playerId);
-        }
+    for (const uid of [player1Id, player2Id]) {
+      const t = this.pendingDisconnects.get(uid);
+      if (t) {
+        clearTimeout(t);
+        this.pendingDisconnects.delete(uid);
       }
-
-      this.playerToGame.delete(gameData.player1.id);
-      this.playerToGame.delete(gameData.player2.id);
-      this.games.delete(gameId);
-      console.log(`Game ended: ${gameId}`);
     }
+
+    await Promise.all([
+      store.clearPlayerGame(player1Id),
+      store.clearPlayerGame(player2Id),
+      store.deleteGame(gameId)
+    ]);
+
+    await this._removePlayersFromGameRoom(gameId, player1Id, player2Id);
+    console.log(`Game ended: ${gameId}`);
   }
 
-  handleLeaveGame(playerId, message = 'Player has disconnected') {
-    const gameId = this.playerToGame.get(playerId);
-    if (!gameId) {
-      return;
-    }
-
-    const gameData = this.games.get(gameId);
-    if (!gameData) {
-      return;
-    }
-
-    const payload = { message, gameId };
-    gameData.player1.socket.emit('playerLeft', payload);
-    gameData.player2.socket.emit('playerLeft', payload);
-    this.endGame(gameId);
+  async handleLeaveGame(playerId, message = 'Player has disconnected') {
+    const gameId = await store.getPlayerGame(playerId);
+    if (!gameId) return;
+    this.io.to(gameRoom(gameId)).emit('playerLeft', { message, gameId });
+    await this.endGame(gameId);
   }
 
-  // Schedule, not execute, the "opponent disconnected" notification. If the
-  // player's socket reconnects within RECONNECT_GRACE_MS we cancel this and the
-  // other player never even sees a hiccup. If they don't reconnect in time, we
-  // fire the notification and end the game.
-  handleDisconnect(playerId) {
-    const gameId = this.playerToGame.get(playerId);
+  // Schedule, not execute, the "opponent disconnected" notification. Local
+  // setTimeout — the listener for the user's room across the cluster is
+  // checked when the timer fires.
+  async handleDisconnect(playerId) {
+    const gameId = await store.getPlayerGame(playerId);
     if (!gameId) return;
 
-    // Defensively clear any prior pending timer for this user (e.g. if they
-    // dropped, came back, then dropped again — we want the new grace period).
     const existing = this.pendingDisconnects.get(playerId);
     if (existing) clearTimeout(existing);
 
-    const handle = setTimeout(() => {
+    const handle = setTimeout(async () => {
       this.pendingDisconnects.delete(playerId);
+      try {
+        // If the game has already been torn down (peer hit Leave, TTL
+        // expiry, etc.), nothing to do.
+        const state = await store.loadGameState(gameId);
+        if (!state) return;
 
-      const gameData = this.games.get(gameId);
-      if (!gameData) return; // game already ended (e.g. via leaveGame)
+        // Cross-instance reconnection check. If the user has any live
+        // socket anywhere in the cluster, treat them as reconnected.
+        const sockets = await this.io.in(userRoom(playerId)).fetchSockets();
+        if (sockets.length > 0) return;
 
-      // If the socket reference for this user has been swapped out via
-      // reattachSocket, they reconnected — bail out without kicking anyone.
-      const myEntry = gameData.player1.id === playerId ? gameData.player1 : gameData.player2;
-      if (myEntry.socket && myEntry.socket.connected) return;
-
-      const otherPlayer = gameData.player1.id === playerId
-        ? gameData.player2
-        : gameData.player1;
-
-      otherPlayer.socket.emit('opponentDisconnected', { message: 'Player has disconnected', gameId });
-      this.endGame(gameId);
+        const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+        if (otherId) {
+          this.io.to(userRoom(otherId)).emit('opponentDisconnected', {
+            message: 'Player has disconnected',
+            gameId
+          });
+        }
+        await this.endGame(gameId);
+      } catch (err) {
+        console.error('[gameManager] disconnect timer failed:', err.message);
+      }
     }, RECONNECT_GRACE_MS);
 
     this.pendingDisconnects.set(playerId, handle);
   }
 
-  // Called from the io connection handler when a NEW socket arrives carrying
-  // a userId that already has an active game. Swaps the new socket into the
-  // game data so subsequent emits reach the live connection, cancels any
-  // pending disconnect timer, and re-syncs the client's state.
-  reattachSocket(userId, socket) {
-    const gameId = this.playerToGame.get(userId);
+  // Called from io.on('connection') when a fresh socket arrives carrying a
+  // userId that already has an active game. Re-joins the right rooms and
+  // pushes the current state. Crucially, we ALSO clear the local pending
+  // disconnect timer if there is one — and broadcast a "user is back"
+  // signal so other instances clear theirs too.
+  async reattachSocket(userId, socket) {
+    const gameId = await store.getPlayerGame(userId);
     if (!gameId) return false;
-
-    const gameData = this.games.get(gameId);
-    if (!gameData) return false;
-
-    if (gameData.player1.id === userId) {
-      gameData.player1.socket = socket;
-    } else if (gameData.player2.id === userId) {
-      gameData.player2.socket = socket;
-    } else {
+    const state = await store.loadGameState(gameId);
+    if (!state) {
+      // Stale player→game mapping (game was deleted but the mapping wasn't).
+      // Clean up so we don't keep tripping over it.
+      await store.clearPlayerGame(userId);
       return false;
     }
+
+    await socket.join(gameRoom(gameId));
 
     const pending = this.pendingDisconnects.get(userId);
     if (pending) {
@@ -255,14 +334,22 @@ class GameManager {
       this.pendingDisconnects.delete(userId);
     }
 
-    // Push current game state to the reattached client so it doesn't have a
-    // stale view (helps when the iOS view model survived but the socket churned).
-    this.sendGameState(gameId);
+    // Push current game state to just this socket so the freshly-loaded
+    // client doesn't have a stale view.
+    const game = this._hydrate(state);
+    if (game) {
+      socket.emit('gameState', {
+        player1Symbol: game.player1Symbol,
+        player2Symbol: game.player2Symbol,
+        gameType: game.gameType,
+        ...game.getState()
+      });
+    }
     return true;
   }
 
-  isPlayerInGame(playerId) {
-    return this.playerToGame.has(playerId);
+  async isPlayerInGame(playerId) {
+    return store.isPlayerInGame(playerId);
   }
 }
 
