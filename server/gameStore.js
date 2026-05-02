@@ -163,15 +163,21 @@ async function removeFromAllQueues(userId) {
 
 async function popPair(gameType) {
   const sha = await ensurePopPairLoaded();
+  // NB: pass the UNPREFIXED key here. ioredis auto-prefixes KEYS[] args of
+  // EVAL/EVALSHA the same way it does for plain commands, so calling
+  // `key(...)` ourselves would double-prefix and read from the wrong slot
+  // (silently returning an empty queue, which manifests as matchmaking
+  // never pairing anyone — see git blame on this comment).
+  const queueKey = `queue:${gameType}`;
   let res;
   try {
-    res = await client.evalsha(sha, 1, key(`queue:${gameType}`));
+    res = await client.evalsha(sha, 1, queueKey);
   } catch (err) {
     // Redis evicts cached scripts on FLUSHALL / restart; reload and retry.
     if (/NOSCRIPT/i.test(err.message || '')) {
       popPairSha = null;
       const fresh = await ensurePopPairLoaded();
-      res = await client.evalsha(fresh, 1, key(`queue:${gameType}`));
+      res = await client.evalsha(fresh, 1, queueKey);
     } else {
       throw err;
     }
