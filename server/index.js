@@ -52,8 +52,16 @@ io.on('connection', (socket) => {
   
   // Store userId on socket for easy access
   socket.userId = userId;
-  
+
   console.log(`Player connected: socket.id=${socket.id}, userId=${userId}`);
+
+  // If this user already has an active game (e.g. they had a transient blip
+  // and Socket.IO auto-reconnected), reattach this fresh socket to the game
+  // so the other player never sees a "disconnected" notice. Cancels any
+  // pending grace-period timer set by the previous socket's `disconnect`.
+  if (gameManager.reattachSocket(userId, socket)) {
+    console.log(`  ↳ reattached to active game for userId=${userId}`);
+  }
 
   socket.on('findMatch', (data) => {
     const gameType = data?.gameType || 'religion'; // Default to "Trending in the USA"
