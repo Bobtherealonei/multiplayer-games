@@ -1,15 +1,20 @@
-// topicDebate.js — "Trending in the USA" is now powered by the data-collector.
+// topicDebate.js — debate game backed by live-news questions for the
+// "live" topics (Trending in the USA, Politics around the World, Sports) and
+// a static rotation for the rest (AI, College & Careers).
 //
 // Pipeline split:
-//   data-collector -> writes/retires items in Firestore `newsItems`
+//   data-collector -> writes/retires items in Firestore `newsItems`, tagging
+//                     each item with a `topic` (trendingUSA | politicsWorld |
+//                     sports). Legacy docs without `topic` default to
+//                     trendingUSA on read.
 //   this file      -> reads live items, filters out questions either player
-//                     has already debated, records seen questions per user
+//                     has already debated, records seen questions per user.
 //
 // Per-user dedup: users/{uid}.seenDebateQuestions is an array of question IDs
 //   (doc IDs from `newsItems`). We use arrayUnion to append after each match.
 //
-// State model (since the refactor to support multi-instance scaling):
-//   The class instance is now EPHEMERAL — game state lives in Redis and the
+// State model (multi-instance scaling):
+//   The class instance is EPHEMERAL — game state lives in Redis and the
 //   instance is rehydrated on demand via fromState(). That lets any
 //   game-server instance load a game, mutate it, save it back, and broadcast
 //   an update through the Socket.IO redis-adapter, regardless of which
@@ -18,70 +23,153 @@
 const Game = require('./game');
 const { getDb, getAdmin } = require('./firestoreClient');
 
-const TRENDING_USA_TITLE = 'Trending in the USA';
 const CACHE_TTL_MS = 2 * 60 * 1000;
-const MAX_POOL = 50;
+const MAX_POOL_PER_TOPIC = 50;
+const FETCH_LIMIT = 200; // covers MAX_POOL_PER_TOPIC * #topics + headroom
 const SEEN_ARRAY_CAP = 500;
 
-const FALLBACK_QUESTIONS = [
-  'Is the U.S. response to the current conflict in the Middle East the right move?',
-  'Are current U.S. foreign policy decisions making America stronger or weaker?',
-  'Is the media covering today\'s biggest stories fairly?',
-  'Should the U.S. be more involved in what is happening internationally right now?',
-  'Is the government handling the economy the right way?'
-];
+// ─── Live topics ──────────────────────────────────────────────────────────
+// gameType -> { topic (Firestore tag), title (UI label), fallbacks (static
+// safety-net questions when Firestore has nothing live for this topic) }
 
-// In-memory per-instance cache of trending questions. Each instance does its
-// own refresh; that's a few extra Firestore reads per instance per minute,
-// which is negligible. Sharing this cache via Redis would be more code for
-// no real win.
-const trendingCache = {
-  items: [],
-  updatedAt: 0,
-  refreshInFlight: null
+const LIVE_TOPIC_META = {
+  // 'religion' is the legacy enum key for the "Trending in the USA" slot.
+  religion: {
+    topic: 'trendingUSA',
+    title: 'Trending in the USA',
+    fallbacks: [
+      'Is the U.S. response to the current conflict in the Middle East the right move?',
+      'Are current U.S. foreign policy decisions making America stronger or weaker?',
+      'Is the media covering today\'s biggest stories fairly?',
+      'Should the U.S. be more involved in what is happening internationally right now?',
+      'Is the government handling the economy the right way?'
+    ]
+  },
+  currentPolitics: {
+    topic: 'politicsWorld',
+    title: 'Politics around the World',
+    fallbacks: [
+      'Is the West\'s response to the war in Ukraine still the right approach?',
+      'Should the U.N. have more power to step in during international conflicts?',
+      'Is global democracy in decline?',
+      'Are economic sanctions an effective foreign policy tool?',
+      'Should countries open their borders more or close them tighter?'
+    ]
+  },
+  sportsDebate: {
+    topic: 'sports',
+    title: 'Sports',
+    fallbacks: [
+      'Is winning more important than sportsmanship?',
+      'Should college athletes be paid more?',
+      'Are athletes overpaid?',
+      'Should performance-enhancing drug users be permanently banned?',
+      'Are dynasties good for sports?',
+      'Is team loyalty more important than going where you can win?'
+    ]
+  }
 };
 
-async function refreshCacheFromFirestore() {
+const LIVE_GAME_TYPES = new Set(Object.keys(LIVE_TOPIC_META));
+const TRENDING_GAME_TYPE = 'religion'; // legacy export kept for callers
+const TRENDING_USA_TITLE = LIVE_TOPIC_META.religion.title;
+const FALLBACK_QUESTIONS = LIVE_TOPIC_META.religion.fallbacks; // legacy export
+
+// ─── Static topics ────────────────────────────────────────────────────────
+// Topics that never pull live news — they just rotate from a curated list.
+const STATIC_TOPICS = {
+  aiFuture: {
+    title: 'AI and the Future',
+    questions: [
+      'Will AI create more jobs than it destroys over the next decade?',
+      'Is AI more helpful than dangerous right now?',
+      'Should AI be heavily regulated by governments?',
+      'Will AI make school and college degrees less valuable?',
+      'Could AI become smarter than humans in a dangerous way?',
+      'Should companies have to tell you when you are talking to AI?',
+      'Will AI improve daily life more than it harms privacy?',
+      'Is society moving too fast with AI development?'
+    ]
+  },
+  collegeCareers: {
+    title: 'College and Careers',
+    questions: [
+      'Is college worth the cost anymore?',
+      'Should trade school be pushed as hard as college?',
+      'Is it better to follow your passion or choose a high-paying career?',
+      'Is networking more important than raw talent in getting a good job?',
+      'Will a college degree matter less in ten years?',
+      'Should internships always be paid?',
+      'Is starting your own business better than working for someone else?'
+    ]
+  }
+};
+
+// ─── Live cache ───────────────────────────────────────────────────────────
+// One Firestore query feeds all three live topics — we partition the result
+// in memory. That keeps us on the existing (retiredAt, publishedAt) composite
+// index and avoids adding a per-topic index.
+
+const trendingCaches = {
+  trendingUSA:   { items: [] },
+  politicsWorld: { items: [] },
+  sports:        { items: [] }
+};
+const cacheMeta = { updatedAt: 0, refreshInFlight: null };
+
+async function refreshAllCachesFromFirestore() {
   const db = getDb();
   if (!db) {
-    trendingCache.items = [];
-    trendingCache.updatedAt = Date.now();
+    cacheMeta.updatedAt = Date.now();
     return;
   }
-
   try {
     const snap = await db
       .collection('newsItems')
       .where('retiredAt', '==', null)
       .orderBy('publishedAt', 'desc')
-      .limit(MAX_POOL)
+      .limit(FETCH_LIMIT)
       .get();
 
-    const items = [];
+    const buckets = { trendingUSA: [], politicsWorld: [], sports: [] };
     snap.forEach((doc) => {
       const data = doc.data();
-      if (data.debateQuestion) {
-        items.push({ id: doc.id, question: data.debateQuestion });
+      if (!data.debateQuestion) return;
+      // Legacy docs (pre-multi-topic) don't have a `topic` field — treat
+      // them as trendingUSA so existing matches don't go empty during the
+      // 24h turnover after deploy.
+      const t = data.topic || 'trendingUSA';
+      if (buckets[t]) {
+        buckets[t].push({ id: doc.id, question: data.debateQuestion });
       }
     });
 
-    trendingCache.items = items;
-    trendingCache.updatedAt = Date.now();
-    console.log('[TopicDebate] Loaded ' + items.length + ' live news items from Firestore');
+    for (const topic of Object.keys(trendingCaches)) {
+      trendingCaches[topic].items = buckets[topic].slice(0, MAX_POOL_PER_TOPIC);
+    }
+    cacheMeta.updatedAt = Date.now();
+    console.log(
+      `[TopicDebate] Live cache refreshed — ` +
+      `trendingUSA=${trendingCaches.trendingUSA.items.length}, ` +
+      `politicsWorld=${trendingCaches.politicsWorld.items.length}, ` +
+      `sports=${trendingCaches.sports.items.length}`
+    );
   } catch (err) {
     console.error('[TopicDebate] Firestore fetch failed:', err.message);
   }
 }
 
 function ensureFreshCache() {
-  const stale = Date.now() - trendingCache.updatedAt > CACHE_TTL_MS;
-  if ((stale || !trendingCache.updatedAt) && !trendingCache.refreshInFlight) {
-    trendingCache.refreshInFlight = refreshCacheFromFirestore().finally(() => {
-      trendingCache.refreshInFlight = null;
+  const stale = Date.now() - cacheMeta.updatedAt > CACHE_TTL_MS;
+  if ((stale || !cacheMeta.updatedAt) && !cacheMeta.refreshInFlight) {
+    cacheMeta.refreshInFlight = refreshAllCachesFromFirestore().finally(() => {
+      cacheMeta.refreshInFlight = null;
     });
   }
-  return trendingCache.refreshInFlight || Promise.resolve();
+  return cacheMeta.refreshInFlight || Promise.resolve();
 }
+
+// ─── Per-user seen tracking ───────────────────────────────────────────────
 
 async function getSeenSet(db, userId) {
   if (!userId) return new Set();
@@ -122,62 +210,7 @@ async function recordSeen(db, userIds, questionId) {
   );
 }
 
-const STATIC_TOPICS = {
-  aiFuture: {
-    title: 'AI and the Future',
-    questions: [
-      'Will AI create more jobs than it destroys over the next decade?',
-      'Is AI more helpful than dangerous right now?',
-      'Should AI be heavily regulated by governments?',
-      'Will AI make school and college degrees less valuable?',
-      'Could AI become smarter than humans in a dangerous way?',
-      'Should companies have to tell you when you are talking to AI?',
-      'Will AI improve daily life more than it harms privacy?',
-      'Is society moving too fast with AI development?'
-    ]
-  },
-  currentPolitics: {
-    title: 'Current Politics',
-    questions: [
-      'Is Trump doing a good job as president?',
-      'Is the U.S. government more divided than ever?',
-      'Should age limits exist for presidents and members of Congress?',
-      'Is the media fair in how it covers politics?',
-      'Are protests an effective way to create political change?',
-      'Has politics become too extreme in recent years?',
-      'Should the government have more control over big tech companies?',
-      'Is the country headed in the right direction politically?',
-      'Should the U.S. be more involved in international conflicts?'
-    ]
-  },
-  collegeCareers: {
-    title: 'College and Careers',
-    questions: [
-      'Is college worth the cost anymore?',
-      'Should trade school be pushed as hard as college?',
-      'Is it better to follow your passion or choose a high-paying career?',
-      'Is networking more important than raw talent in getting a good job?',
-      'Will a college degree matter less in ten years?',
-      'Should internships always be paid?',
-      'Is starting your own business better than working for someone else?'
-    ]
-  },
-  sportsDebate: {
-    title: 'Sports',
-    questions: [
-      'Is LeBron better than Jordan?',
-      'Is winning more important than sportsmanship?',
-      'Should college athletes be paid?',
-      'Are athletes overpaid compared to other professions?',
-      'Should performance-enhancing drug users be permanently banned from their sport?',
-      'Are dynasties good or bad for sports?',
-      'Is football too dangerous to keep playing at the youth level?',
-      'Should trash talk be considered part of the game?'
-    ]
-  }
-};
-
-const TRENDING_GAME_TYPE = 'religion';
+// ─── Question selection ───────────────────────────────────────────────────
 
 function randomStaticQuestion(gameType) {
   const topic = STATIC_TOPICS[gameType];
@@ -190,15 +223,16 @@ function randomStaticQuestion(gameType) {
   };
 }
 
-async function pickTrendingQuestion(playerIds) {
+async function pickTrendingQuestion(playerIds, gameType) {
+  const meta = LIVE_TOPIC_META[gameType] || LIVE_TOPIC_META[TRENDING_GAME_TYPE];
   await ensureFreshCache();
-  const pool = trendingCache.items;
+  const pool = (trendingCaches[meta.topic] || trendingCaches.trendingUSA).items;
 
   if (!pool.length) {
     return {
-      topicKey: TRENDING_GAME_TYPE,
-      topicTitle: TRENDING_USA_TITLE,
-      question: FALLBACK_QUESTIONS[Math.floor(Math.random() * FALLBACK_QUESTIONS.length)],
+      topicKey: gameType,
+      topicTitle: meta.title,
+      question: meta.fallbacks[Math.floor(Math.random() * meta.fallbacks.length)],
       questionId: null
     };
   }
@@ -216,12 +250,14 @@ async function pickTrendingQuestion(playerIds) {
   const chosen = picks[Math.floor(Math.random() * picks.length)];
 
   return {
-    topicKey: TRENDING_GAME_TYPE,
-    topicTitle: TRENDING_USA_TITLE,
+    topicKey: gameType,
+    topicTitle: meta.title,
     question: chosen.question,
     questionId: chosen.id
   };
 }
+
+// ─── Game class ───────────────────────────────────────────────────────────
 
 class TopicDebate extends Game {
   constructor() {
@@ -261,8 +297,8 @@ class TopicDebate extends Game {
     this.isDraw = false;
     this.createdAt = Date.now();
 
-    const isTrending = (this.gameType || TRENDING_GAME_TYPE) === TRENDING_GAME_TYPE;
-    if (!isTrending) {
+    const isLive = LIVE_GAME_TYPES.has(this.gameType || '');
+    if (!isLive) {
       const selected = randomStaticQuestion(this.gameType);
       if (selected) {
         this.topicKey = selected.topicKey;
@@ -270,12 +306,13 @@ class TopicDebate extends Game {
         this.question = selected.question;
       }
     } else {
-      this.topicKey = TRENDING_GAME_TYPE;
-      this.topicTitle = TRENDING_USA_TITLE;
+      const meta = LIVE_TOPIC_META[this.gameType] || LIVE_TOPIC_META[TRENDING_GAME_TYPE];
+      this.topicKey = this.gameType;
+      this.topicTitle = meta.title;
       this.question = 'Finding a fresh debate topic...';
-      // Async trending fetch + broadcast is handled by gameManager so the
-      // class itself stays free of Socket.IO references — that's what makes
-      // it safely rehydratable on any instance.
+      // Async live fetch + broadcast is handled by gameManager so the class
+      // itself stays free of Socket.IO references — that's what makes it
+      // safely rehydratable on any instance.
     }
 
     return {
@@ -380,5 +417,7 @@ ensureFreshCache();
 module.exports = TopicDebate;
 module.exports.pickTrendingQuestion = pickTrendingQuestion;
 module.exports.recordSeen = recordSeen;
+module.exports.LIVE_GAME_TYPES = LIVE_GAME_TYPES;
+module.exports.LIVE_TOPIC_META = LIVE_TOPIC_META;
 module.exports.TRENDING_GAME_TYPE = TRENDING_GAME_TYPE;
 module.exports.FALLBACK_QUESTIONS = FALLBACK_QUESTIONS;

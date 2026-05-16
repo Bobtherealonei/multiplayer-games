@@ -17,7 +17,14 @@
 //     1h game-key TTL eventually evicts the orphaned game — acceptable.
 
 const TopicDebate = require('./topicDebate');
-const { pickTrendingQuestion, recordSeen, TRENDING_GAME_TYPE, FALLBACK_QUESTIONS } = TopicDebate;
+const {
+  pickTrendingQuestion,
+  recordSeen,
+  LIVE_GAME_TYPES,
+  LIVE_TOPIC_META,
+  TRENDING_GAME_TYPE,
+  FALLBACK_QUESTIONS
+} = TopicDebate;
 const { getDb } = require('./firestoreClient');
 const store = require('./gameStore');
 
@@ -135,13 +142,13 @@ class GameManager {
 
     console.log(`Game created: ${gameId} between ${player1Id} and ${player2Id}`);
 
-    // Trending topic? Kick off the live-news fetch and broadcast the real
+    // Live-news topic? Kick off the Firestore fetch and broadcast the real
     // question once it's resolved. We do this AFTER createGame returns so
     // the players see the placeholder immediately and the real topic
     // arrives shortly. Self-contained — any instance can be the one to
     // resolve it because the state lives in Redis.
-    if (gameType === TRENDING_GAME_TYPE) {
-      this._resolveTrendingQuestion(gameId, player1Id, player2Id).catch((err) => {
+    if (LIVE_GAME_TYPES.has(gameType)) {
+      this._resolveTrendingQuestion(gameId, gameType, player1Id, player2Id).catch((err) => {
         console.error('[gameManager] _resolveTrendingQuestion failed:', err.message);
       });
     }
@@ -149,14 +156,18 @@ class GameManager {
     return gameId;
   }
 
-  async _resolveTrendingQuestion(gameId, player1Id, player2Id) {
+  async _resolveTrendingQuestion(gameId, gameType, player1Id, player2Id) {
     let chosen;
     try {
-      chosen = await pickTrendingQuestion([player1Id, player2Id]);
+      chosen = await pickTrendingQuestion([player1Id, player2Id], gameType);
     } catch (err) {
       console.error('[gameManager] pickTrendingQuestion failed:', err.message);
+      // Pick the right per-topic fallback bank if we know it, else the legacy
+      // trendingUSA one (FALLBACK_QUESTIONS).
+      const meta = LIVE_TOPIC_META[gameType];
+      const bank = (meta && meta.fallbacks) || FALLBACK_QUESTIONS;
       chosen = {
-        question: FALLBACK_QUESTIONS[Math.floor(Math.random() * FALLBACK_QUESTIONS.length)],
+        question: bank[Math.floor(Math.random() * bank.length)],
         questionId: null
       };
     }
