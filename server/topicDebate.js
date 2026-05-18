@@ -24,9 +24,14 @@ const Game = require('./game');
 const { getDb, getAdmin } = require('./firestoreClient');
 
 const CACHE_TTL_MS = 2 * 60 * 1000;
-const MAX_POOL_PER_TOPIC = 50;
-const FETCH_LIMIT = 200; // covers MAX_POOL_PER_TOPIC * #topics + headroom
-const SEEN_ARRAY_CAP = 500;
+// Pool per topic — big on purpose. With per-user dedup against seen list,
+// a larger pool means more matches before a user could revisit a question.
+const MAX_POOL_PER_TOPIC = 150;
+// Single Firestore query feeds all 5 topic buckets. Cap × #topics + headroom.
+const FETCH_LIMIT = 1000;
+// Per-user list of question IDs already shown. Bigger cap = longer the user
+// can play without seeing repeats. 5000 ≈ years of debating at any sane pace.
+const SEEN_ARRAY_CAP = 5000;
 
 // ─── Live topics ──────────────────────────────────────────────────────────
 // gameType -> { topic (Firestore tag), title (UI label), fallbacks (static
@@ -67,20 +72,15 @@ const LIVE_TOPIC_META = {
       'Are dynasties good for sports?',
       'Is team loyalty more important than going where you can win?'
     ]
-  }
-};
-
-const LIVE_GAME_TYPES = new Set(Object.keys(LIVE_TOPIC_META));
-const TRENDING_GAME_TYPE = 'religion'; // legacy export kept for callers
-const TRENDING_USA_TITLE = LIVE_TOPIC_META.religion.title;
-const FALLBACK_QUESTIONS = LIVE_TOPIC_META.religion.fallbacks; // legacy export
-
-// ─── Static topics ────────────────────────────────────────────────────────
-// Topics that never pull live news — they just rotate from a curated list.
-const STATIC_TOPICS = {
+  },
+  // aiFuture + collegeCareers don't come from RSS, but the data-collector
+  // generates a rolling batch of OpenAI-written questions for them and
+  // writes them into `newsItems` with the topic tag. They get the same
+  // pool-from-Firestore + per-user dedup treatment as the RSS topics.
   aiFuture: {
+    topic: 'aiFuture',
     title: 'AI and the Future',
-    questions: [
+    fallbacks: [
       'Will AI create more jobs than it destroys over the next decade?',
       'Is AI more helpful than dangerous right now?',
       'Should AI be heavily regulated by governments?',
@@ -92,8 +92,9 @@ const STATIC_TOPICS = {
     ]
   },
   collegeCareers: {
+    topic: 'collegeCareers',
     title: 'College and Careers',
-    questions: [
+    fallbacks: [
       'Is college worth the cost anymore?',
       'Should trade school be pushed as hard as college?',
       'Is it better to follow your passion or choose a high-paying career?',
@@ -105,15 +106,32 @@ const STATIC_TOPICS = {
   }
 };
 
+const LIVE_GAME_TYPES = new Set(Object.keys(LIVE_TOPIC_META));
+const TRENDING_GAME_TYPE = 'religion'; // legacy export kept for callers
+const TRENDING_USA_TITLE = LIVE_TOPIC_META.religion.title;
+const FALLBACK_QUESTIONS = LIVE_TOPIC_META.religion.fallbacks; // legacy export
+
+// Defensive copy of the fallback rotation so any future "fully offline" code
+// path (e.g. Firestore unreachable) can still serve a coherent question for
+// any registered game type.
+const STATIC_TOPICS = Object.fromEntries(
+  Object.entries(LIVE_TOPIC_META).map(([gameType, meta]) => [
+    gameType,
+    { title: meta.title, questions: meta.fallbacks }
+  ])
+);
+
 // ─── Live cache ───────────────────────────────────────────────────────────
-// One Firestore query feeds all three live topics — we partition the result
+// One Firestore query feeds all topic buckets — we partition the result
 // in memory. That keeps us on the existing (retiredAt, publishedAt) composite
 // index and avoids adding a per-topic index.
 
 const trendingCaches = {
-  trendingUSA:   { items: [] },
-  politicsWorld: { items: [] },
-  sports:        { items: [] }
+  trendingUSA:    { items: [] },
+  politicsWorld:  { items: [] },
+  sports:         { items: [] },
+  aiFuture:       { items: [] },
+  collegeCareers: { items: [] }
 };
 const cacheMeta = { updatedAt: 0, refreshInFlight: null };
 
@@ -131,7 +149,9 @@ async function refreshAllCachesFromFirestore() {
       .limit(FETCH_LIMIT)
       .get();
 
-    const buckets = { trendingUSA: [], politicsWorld: [], sports: [] };
+    const buckets = Object.fromEntries(
+      Object.keys(trendingCaches).map((t) => [t, []])
+    );
     snap.forEach((doc) => {
       const data = doc.data();
       if (!data.debateQuestion) return;
@@ -148,12 +168,10 @@ async function refreshAllCachesFromFirestore() {
       trendingCaches[topic].items = buckets[topic].slice(0, MAX_POOL_PER_TOPIC);
     }
     cacheMeta.updatedAt = Date.now();
-    console.log(
-      `[TopicDebate] Live cache refreshed — ` +
-      `trendingUSA=${trendingCaches.trendingUSA.items.length}, ` +
-      `politicsWorld=${trendingCaches.politicsWorld.items.length}, ` +
-      `sports=${trendingCaches.sports.items.length}`
-    );
+    const summary = Object.entries(trendingCaches)
+      .map(([t, c]) => `${t}=${c.items.length}`)
+      .join(', ');
+    console.log(`[TopicDebate] Live cache refreshed — ${summary}`);
   } catch (err) {
     console.error('[TopicDebate] Firestore fetch failed:', err.message);
   }
