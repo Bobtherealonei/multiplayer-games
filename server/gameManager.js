@@ -44,7 +44,7 @@ class GameManager {
     this.registerGameType('religion', TopicDebate);
     this.registerGameType('aiFuture', TopicDebate);
     this.registerGameType('currentPolitics', TopicDebate);
-    this.registerGameType('collegeCareers', TopicDebate);
+    this.registerGameType('custom', TopicDebate);
     this.registerGameType('sportsDebate', TopicDebate);
   }
 
@@ -97,7 +97,7 @@ class GameManager {
 
   // Caller (matchmaking) has already popped two userIds out of the queue.
   // We don't need socket references — we emit through rooms.
-  async createGame(player1Id, player2Id, gameType) {
+  async createGame(player1Id, player2Id, gameType, customPayload = null) {
     const GameClass = this.gameFactories.get(gameType);
     if (!GameClass) throw new Error(`Unknown game type: ${gameType}`);
 
@@ -105,6 +105,9 @@ class GameManager {
     const game = new GameClass();
     game.gameId = gameId;
     game.gameType = gameType;
+    if (gameType === 'custom' && customPayload) {
+      game.customDebatePayload = customPayload;
+    }
 
     const initResult = game.createGame([
       { id: player1Id },
@@ -147,7 +150,7 @@ class GameManager {
     // the players see the placeholder immediately and the real topic
     // arrives shortly. Self-contained — any instance can be the one to
     // resolve it because the state lives in Redis.
-    if (LIVE_GAME_TYPES.has(gameType)) {
+    if (LIVE_GAME_TYPES.has(gameType) && gameType !== 'custom') {
       this._resolveTrendingQuestion(gameId, gameType, player1Id, player2Id).catch((err) => {
         console.error('[gameManager] _resolveTrendingQuestion failed:', err.message);
       });

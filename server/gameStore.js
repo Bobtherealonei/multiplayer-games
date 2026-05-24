@@ -195,9 +195,34 @@ async function popPair(gameType) {
   return { user1: u1, user2: u2 };
 }
 
-async function returnToQueue(gameType, userId, joinedAt) {
-  if (!gameType || !userId) return;
-  await client.zadd(`queue:${gameType}`, joinedAt || Date.now(), userId);
+async function returnToQueue(queueKey, userId, joinedAt) {
+  if (!queueKey || !userId) return;
+  await client.zadd(`queue:${queueKey}`, joinedAt || Date.now(), userId);
+}
+
+const QUEUE_META_TTL_SECONDS = 600;
+
+async function setQueueMeta(queueKey, meta) {
+  if (!queueKey || !meta) return;
+  const payload = {
+    customDebateId: meta.customDebateId || '',
+    question: meta.question || '',
+    topicTitle: meta.topicTitle || 'Custom'
+  };
+  await client.hset(`queueMeta:${queueKey}`, payload);
+  await client.expire(`queueMeta:${queueKey}`, QUEUE_META_TTL_SECONDS);
+}
+
+async function getQueueMeta(queueKey) {
+  if (!queueKey) return null;
+  const raw = await client.hgetall(`queueMeta:${queueKey}`);
+  if (!raw || !raw.question) return null;
+  return raw;
+}
+
+async function clearQueueMeta(queueKey) {
+  if (!queueKey) return;
+  await client.del(`queueMeta:${queueKey}`);
 }
 
 // ── Judge cache (single-flight) ─────────────────────────────────────────
@@ -251,6 +276,9 @@ module.exports = {
   removeFromAllQueues,
   popPair,
   returnToQueue,
+  setQueueMeta,
+  getQueueMeta,
+  clearQueueMeta,
   // judge
   getJudgeResult,
   setJudgeResult,

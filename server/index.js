@@ -100,9 +100,10 @@ io.on('connection', async (socket) => {
   }
 
   socket.on('findMatch', async (data) => {
-    const gameType = data?.gameType || 'religion'; // Default to "Trending in the USA"
+    const payload = Array.isArray(data) ? data[0] : data;
+    const gameType = payload?.gameType || 'religion'; // Default to "Trending in the USA"
     try {
-      await matchmaking.addPlayer(socket, gameType, userId);
+      await matchmaking.addPlayer(socket, gameType, userId, payload || {});
     } catch (err) {
       console.error('[findMatch] failed:', err.message);
       socket.emit('matchmakingStatus', { status: 'error', error: 'Internal error' });

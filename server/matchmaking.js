@@ -21,11 +21,14 @@ class Matchmaking {
     this.io = io;
   }
 
-  async addPlayer(socket, gameType, userId) {
+  async addPlayer(socket, gameType, userId, options = {}) {
     if (!gameType) {
       socket.emit('matchmakingStatus', { status: 'error', error: 'gameType is required' });
       return;
     }
+
+    const queueKey = Matchmaking.queueKeyFor(gameType, options);
+    const resolvedGameType = Matchmaking.gameTypeFromQueueKey(queueKey);
 
     // Drop any stale queue entries for this user before re-adding — handles
     // the case where iOS rejoined matchmaking after a soft reconnect or
@@ -37,22 +40,49 @@ class Matchmaking {
       return;
     }
 
-    await store.enqueuePlayer(gameType, userId);
-    socket.emit('matchmakingStatus', { status: 'searching', gameType });
+    if (resolvedGameType === 'custom') {
+      if (!options.customDebateId || !options.question) {
+        socket.emit('matchmakingStatus', {
+          status: 'error',
+          error: 'customDebateId and question are required for custom debates'
+        });
+        return;
+      }
+      await store.setQueueMeta(queueKey, {
+        customDebateId: options.customDebateId,
+        question: options.question,
+        topicTitle: options.topicTitle || 'Custom'
+      });
+    }
 
-    await this.tryMatchmaking(gameType);
+    await store.enqueuePlayer(queueKey, userId);
+    socket.emit('matchmakingStatus', { status: 'searching', gameType: resolvedGameType });
+
+    await this.tryMatchmaking(queueKey, resolvedGameType);
+  }
+
+  static queueKeyFor(gameType, options = {}) {
+    if (gameType === 'custom' && options.customDebateId) {
+      return `custom:${options.customDebateId}`;
+    }
+    return gameType;
+  }
+
+  static gameTypeFromQueueKey(queueKey) {
+    if (typeof queueKey === 'string' && queueKey.startsWith('custom:')) return 'custom';
+    return queueKey;
   }
 
   async removePlayer(userId) {
     await store.removeFromAllQueues(userId);
   }
 
-  async tryMatchmaking(gameType) {
+  async tryMatchmaking(queueKey, gameType = Matchmaking.gameTypeFromQueueKey(queueKey)) {
     // popPair is atomic across instances. Loop in case the first pair we
     // pop has a dead user (one who closed the app) — the second user
     // returns to the queue and we try again.
     for (let attempt = 0; attempt < 5; attempt++) {
-      const pair = await store.popPair(gameType);
+      const pair = await store.popPair(queueKey);
       if (!pair) return; // queue has fewer than 2 — done
 
       // popPair telegraphs a too-old entry by returning { stale: userId }.
@@ -61,7 +91,7 @@ class Matchmaking {
         if (pair.returned) {
           // The other user from the pair was fine; put them back so the
           // next eligible newcomer can match against them.
-          await store.returnToQueue(gameType, pair.returned, Date.now());
+          await store.returnToQueue(queueKey, pair.returned, Date.now());
         }
         continue;
       }
@@ -79,24 +109,34 @@ class Matchmaking {
         continue; // both dead, drop both
       }
       if (!live[0]) {
-        await store.returnToQueue(gameType, user2, Date.now());
+        await store.returnToQueue(queueKey, user2, Date.now());
         continue;
       }
       if (!live[1]) {
-        await store.returnToQueue(gameType, user1, Date.now());
+        await store.returnToQueue(queueKey, user1, Date.now());
         continue;
       }
 
       try {
-        await this.gameManager.createGame(user1, user2, gameType);
+        let customPayload = null;
+        if (gameType === 'custom') {
+          customPayload = await store.getQueueMeta(queueKey);
+          if (!customPayload?.question) {
+            throw new Error('Missing custom debate metadata');
+          }
+        }
+        await this.gameManager.createGame(user1, user2, gameType, customPayload);
+        if (gameType === 'custom') {
+          await store.clearQueueMeta(queueKey);
+        }
       } catch (err) {
         console.error('[matchmaking] createGame failed:', err.message);
         // Best effort: requeue both. Worst case the requeue itself fails
         // and the iOS client retries findMatch on its own, which will
         // re-enqueue them.
         await Promise.all([
-          store.returnToQueue(gameType, user1, Date.now()),
-          store.returnToQueue(gameType, user2, Date.now())
+          store.returnToQueue(queueKey, user1, Date.now()),
+          store.returnToQueue(queueKey, user2, Date.now())
         ]);
       }
       return;

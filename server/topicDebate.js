@@ -91,17 +91,11 @@ const LIVE_TOPIC_META = {
       'Is society moving too fast with AI development?'
     ]
   },
-  collegeCareers: {
-    topic: 'collegeCareers',
-    title: 'College and Careers',
+  custom: {
+    topic: 'custom',
+    title: 'Custom',
     fallbacks: [
-      'Is college worth the cost anymore?',
-      'Should trade school be pushed as hard as college?',
-      'Is it better to follow your passion or choose a high-paying career?',
-      'Is networking more important than raw talent in getting a good job?',
-      'Will a college degree matter less in ten years?',
-      'Should internships always be paid?',
-      'Is starting your own business better than working for someone else?'
+      'Player-created debates use the question chosen when matchmaking.'
     ]
   }
 };
@@ -131,7 +125,7 @@ const trendingCaches = {
   politicsWorld:  { items: [] },
   sports:         { items: [] },
   aiFuture:       { items: [] },
-  collegeCareers: { items: [] }
+  custom: { items: [] }
 };
 const cacheMeta = { updatedAt: 0, refreshInFlight: null };
 
@@ -296,6 +290,7 @@ class TopicDebate extends Game {
     this.winner = null;
     this.isDraw = false;
     this.createdAt = null;
+    this.customDebatePayload = null;
     ensureFreshCache();
   }
 
@@ -315,7 +310,19 @@ class TopicDebate extends Game {
     this.isDraw = false;
     this.createdAt = Date.now();
 
-    const isLive = LIVE_GAME_TYPES.has(this.gameType || '');
+    if (this.gameType === 'custom' && this.customDebatePayload?.question) {
+      this.topicKey = 'custom';
+      this.topicTitle = this.customDebatePayload.topicTitle || 'Custom';
+      this.question = this.customDebatePayload.question;
+      this.customDebatePayload = null;
+      return {
+        success: true,
+        player1: { id: this.player1Id, symbol: this.player1Symbol },
+        player2: { id: this.player2Id, symbol: this.player2Symbol }
+      };
+    }
+
+    const isLive = LIVE_GAME_TYPES.has(this.gameType || '') && this.gameType !== 'custom';
     if (!isLive) {
       const selected = randomStaticQuestion(this.gameType);
       if (selected) {
