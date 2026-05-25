@@ -12,11 +12,21 @@
 //   Locally you can also set FIREBASE_SERVICE_ACCOUNT_PATH to a file path
 //   and this module will require() it.
 
+// Load the full protobufjs bundle before Firebase Admin pulls in google-gax,
+// which can otherwise resolve protobufjs/src/* and crash on incomplete installs.
+try {
+  require('protobufjs');
+} catch (err) {
+  console.warn('[firestoreClient] protobufjs preload warning:', err.message);
+}
+
 const admin = require('firebase-admin');
 
 let db = null;
+let firestoreDisabled = false;
 
 function getDb() {
+  if (firestoreDisabled) return null;
   if (db) return db;
 
   if (!admin.apps.length) {
@@ -50,8 +60,14 @@ function getDb() {
     }
   }
 
-  db = admin.firestore();
-  return db;
+  try {
+    db = admin.firestore();
+    return db;
+  } catch (err) {
+    console.error('[firestoreClient] Firestore init failed:', err.message);
+    firestoreDisabled = true;
+    return null;
+  }
 }
 
 function getAdmin() {

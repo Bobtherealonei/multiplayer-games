@@ -168,6 +168,11 @@ async function refreshAllCachesFromFirestore() {
     console.log(`[TopicDebate] Live cache refreshed — ${summary}`);
   } catch (err) {
     console.error('[TopicDebate] Firestore fetch failed:', err.message);
+    if (/util\/patterns|protobufjs/i.test(err.message)) {
+      console.error(
+        '[TopicDebate] Deploy protobufjs is broken — redeploy after `npm ci` in server/ (see package.json overrides). Using fallback questions only.'
+      );
+    }
   }
 }
 
