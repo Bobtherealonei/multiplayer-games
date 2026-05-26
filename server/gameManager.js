@@ -352,6 +352,17 @@ class GameManager {
     // client doesn't have a stale view.
     const game = this._hydrate(state);
     if (game) {
+      const symbol =
+        userId === game.player1Id ? game.player1Symbol : game.player2Symbol;
+      const opponentUid =
+        userId === game.player1Id ? game.player2Id : game.player1Id;
+      socket.emit('gameFound', {
+        gameId,
+        symbol,
+        opponentUid,
+        opponent: opponentUid,
+        gameType: game.gameType
+      });
       socket.emit('gameState', {
         player1Symbol: game.player1Symbol,
         player2Symbol: game.player2Symbol,
