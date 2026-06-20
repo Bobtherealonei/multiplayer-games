@@ -74,4 +74,19 @@ function getAdmin() {
   return admin;
 }
 
-module.exports = { getDb, getAdmin };
+// Returns the Admin Auth instance (for verifyIdToken), ensuring the Admin app
+// is initialised first. Returns null if credentials aren't configured.
+function getAuth() {
+  // getDb() performs the one-time admin.initializeApp(); reuse it so auth and
+  // firestore share the same credentialed app.
+  getDb();
+  if (!admin.apps.length) return null;
+  try {
+    return admin.auth();
+  } catch (err) {
+    console.error('[firestoreClient] auth init failed:', err.message);
+    return null;
+  }
+}
+
+module.exports = { getDb, getAdmin, getAuth };

@@ -27,6 +27,7 @@ const {
 } = TopicDebate;
 const { getDb } = require('./firestoreClient');
 const store = require('./gameStore');
+const rewards = require('./rewards');
 
 const RECONNECT_GRACE_MS = 12000;
 
@@ -97,7 +98,13 @@ class GameManager {
 
   // Caller (matchmaking) has already popped two userIds out of the queue.
   // We don't need socket references — we emit through rooms.
-  async createGame(player1Id, player2Id, gameType, customPayload = null) {
+  //
+  // matchPayload (position-based topic debates) carries the question chosen on
+  // the client before matchmaking plus each player's Support/Oppose stance:
+  //   { question, questionId, topicTitle, positions: { [uid]: 'support'|'oppose' } }
+  // When present we use that question verbatim and skip the async live-news
+  // resolution below.
+  async createGame(player1Id, player2Id, gameType, customPayload = null, matchPayload = null) {
     const GameClass = this.gameFactories.get(gameType);
     if (!GameClass) throw new Error(`Unknown game type: ${gameType}`);
 
@@ -107,6 +114,9 @@ class GameManager {
     game.gameType = gameType;
     if (gameType === 'custom' && customPayload) {
       game.customDebatePayload = customPayload;
+    }
+    if (matchPayload) {
+      game.preChosenMatch = matchPayload;
     }
 
     const initResult = game.createGame([
@@ -123,6 +133,10 @@ class GameManager {
 
     await this._joinPlayersToGameRoom(gameId, player1Id, player2Id);
 
+    // Each player's Support/Oppose stance (position-based topic debates).
+    const p1Position = game.player1Position || null;
+    const p2Position = game.player2Position || null;
+
     // Dispatch the per-user `gameFound` events. Each player needs to know
     // their own symbol AND the opponent's id, which is asymmetric, so we
     // emit twice — once per user room.
@@ -131,26 +145,40 @@ class GameManager {
       symbol: initResult.player1.symbol,
       opponentUid: player2Id,
       opponent: player2Id, // legacy
-      gameType
+      gameType,
+      position: p1Position,
+      opponentPosition: p2Position,
+      question: game.question
     });
     this.io.to(userRoom(player2Id)).emit('gameFound', {
       gameId,
       symbol: initResult.player2.symbol,
       opponentUid: player1Id,
       opponent: player1Id, // legacy
-      gameType
+      gameType,
+      position: p2Position,
+      opponentPosition: p1Position,
+      question: game.question
     });
 
     await this.sendGameState(gameId, game);
 
     console.log(`Game created: ${gameId} between ${player1Id} and ${player2Id}`);
 
-    // Live-news topic? Kick off the Firestore fetch and broadcast the real
-    // question once it's resolved. We do this AFTER createGame returns so
-    // the players see the placeholder immediately and the real topic
-    // arrives shortly. Self-contained — any instance can be the one to
-    // resolve it because the state lives in Redis.
-    if (LIVE_GAME_TYPES.has(gameType) && gameType !== 'custom') {
+    // If the client already chose the question (position-based flow), the
+    // game class has it set — we only need to record it as "seen" for both
+    // players so the next /next-question call doesn't repeat it. Otherwise
+    // (legacy / custom path) kick off the async live-news resolution.
+    if (matchPayload && matchPayload.questionId) {
+      const db = getDb();
+      if (db) {
+        recordSeen(db, [player1Id, player2Id], matchPayload.questionId).catch((err) => {
+          console.warn('[gameManager] recordSeen (preChosen) failed:', err.message);
+        });
+      }
+    } else if (!matchPayload && LIVE_GAME_TYPES.has(gameType) && gameType !== 'custom') {
+      // Live-news topic with no pre-chosen question? Kick off the Firestore
+      // fetch and broadcast the real question once it's resolved.
       this._resolveTrendingQuestion(gameId, gameType, player1Id, player2Id).catch((err) => {
         console.error('[gameManager] _resolveTrendingQuestion failed:', err.message);
       });
@@ -225,6 +253,12 @@ class GameManager {
     const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
     if (!otherId) return;
 
+    // First message marks the debate as "started" — only started debates pay
+    // out tokens / count as a forfeit if abandoned (see rewards.js).
+    if (!state.startedAt) {
+      await store.patchGameState(gameId, { startedAt: Date.now() });
+    }
+
     this.io.to(userRoom(otherId)).emit('chatMessage', {
       message: payload?.message,
       sender: payload?.sender,
@@ -281,6 +315,14 @@ class GameManager {
   async handleLeaveGame(playerId, message = 'Player has disconnected') {
     const gameId = await store.getPlayerGame(playerId);
     if (!gameId) return;
+    // If the debate had already started, quitting counts as a loss for the
+    // quitter and a win for the opponent. Process BEFORE teardown so the game
+    // state (player IDs, startedAt) is still in Redis. Idempotent.
+    try {
+      await rewards.processForfeit(gameId, playerId);
+    } catch (err) {
+      console.error('[gameManager] forfeit (leave) failed:', err.message);
+    }
     this.io.to(gameRoom(gameId)).emit('playerLeft', { message, gameId });
     await this.endGame(gameId);
   }
@@ -307,6 +349,14 @@ class GameManager {
         // socket anywhere in the cluster, treat them as reconnected.
         const sockets = await this.io.in(userRoom(playerId)).fetchSockets();
         if (sockets.length > 0) return;
+
+        // Treat a real disconnect (no reconnection within the grace window)
+        // of a started debate as a forfeit. Idempotent via debateResults.
+        try {
+          await rewards.processForfeit(gameId, playerId);
+        } catch (err) {
+          console.error('[gameManager] forfeit (disconnect) failed:', err.message);
+        }
 
         const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
         if (otherId) {

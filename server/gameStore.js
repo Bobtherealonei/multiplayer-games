@@ -40,11 +40,31 @@ if count < 2 then return {} end
 return redis.call('ZPOPMIN', KEYS[1], 2)
 `;
 
+// Atomic "pop one from each of two queues" — used by position-based
+// matchmaking to pair a Support player with an Oppose player. Either we get
+// one from each side or nothing, so two instances can never grab the same
+// player. Returns [supportUser, supportScore, opposeUser, opposeScore].
+const POP_OPPOSING_LUA = `
+local s = redis.call('ZCARD', KEYS[1])
+local o = redis.call('ZCARD', KEYS[2])
+if s < 1 or o < 1 then return {} end
+local a = redis.call('ZPOPMIN', KEYS[1], 1)
+local b = redis.call('ZPOPMIN', KEYS[2], 1)
+return {a[1], a[2], b[1], b[2]}
+`;
+
 let popPairSha = null;
 async function ensurePopPairLoaded() {
   if (popPairSha) return popPairSha;
   popPairSha = await client.script('LOAD', POP_PAIR_LUA);
   return popPairSha;
+}
+
+let popOpposingSha = null;
+async function ensurePopOpposingLoaded() {
+  if (popOpposingSha) return popOpposingSha;
+  popOpposingSha = await client.script('LOAD', POP_OPPOSING_LUA);
+  return popOpposingSha;
 }
 
 // ── Game state ──────────────────────────────────────────────────────────
@@ -195,9 +215,85 @@ async function popPair(gameType) {
   return { user1: u1, user2: u2 };
 }
 
+// Pop one player from each of two opposing queues (Support vs Oppose).
+// Both queueKey args are the UNPREFIXED suffix (e.g.
+// "aiFuture::q::abc123::support"); ioredis auto-prefixes the KEYS[] args of
+// EVALSHA just like plain commands, so we pass `queue:<suffix>` directly —
+// see the popPair() note about double-prefixing.
+async function popOpposingPair(supportSuffix, opposeSuffix) {
+  const sha = await ensurePopOpposingLoaded();
+  const supportKey = `queue:${supportSuffix}`;
+  const opposeKey = `queue:${opposeSuffix}`;
+  let res;
+  try {
+    res = await client.evalsha(sha, 2, supportKey, opposeKey);
+  } catch (err) {
+    if (/NOSCRIPT/i.test(err.message || '')) {
+      popOpposingSha = null;
+      const fresh = await ensurePopOpposingLoaded();
+      res = await client.evalsha(fresh, 2, supportKey, opposeKey);
+    } else {
+      throw err;
+    }
+  }
+  if (!Array.isArray(res) || res.length < 4) return null;
+  const [supportUser, supportScore, opposeUser, opposeScore] = res;
+  const now = Date.now();
+  // Drop ancient entries the same way popPair does; tell caller which side(s)
+  // were stale so it can leave the survivor in place.
+  const supportStale = now - Number(supportScore) > QUEUE_STALE_MS;
+  const opposeStale = now - Number(opposeScore) > QUEUE_STALE_MS;
+  if (supportStale || opposeStale) {
+    return {
+      stale: true,
+      supportUser: supportStale ? null : supportUser,
+      opposeUser: opposeStale ? null : opposeUser,
+      supportSuffix,
+      opposeSuffix
+    };
+  }
+  return { supportUser, opposeUser };
+}
+
 async function returnToQueue(queueKey, userId, joinedAt) {
   if (!queueKey || !userId) return;
   await client.zadd(`queue:${queueKey}`, joinedAt || Date.now(), userId);
+}
+
+async function removeFromQueue(queueKey, userId) {
+  if (!queueKey || !userId) return;
+  await client.zrem(`queue:${queueKey}`, userId);
+}
+
+// ── Per-player matchmaking context ──────────────────────────────────────
+// Stores the question/position a searching player chose so that when they're
+// popped out of an opposing queue we know which question + side to assign.
+
+const MATCH_CONTEXT_TTL_SECONDS = 600;
+
+async function setMatchContext(userId, ctx) {
+  if (!userId || !ctx) return;
+  const payload = {
+    gameType: ctx.gameType || '',
+    questionId: ctx.questionId || '',
+    question: ctx.question || '',
+    position: ctx.position || 'support',
+    topicTitle: ctx.topicTitle || ''
+  };
+  await client.hset(`mmctx:${userId}`, payload);
+  await client.expire(`mmctx:${userId}`, MATCH_CONTEXT_TTL_SECONDS);
+}
+
+async function getMatchContext(userId) {
+  if (!userId) return null;
+  const raw = await client.hgetall(`mmctx:${userId}`);
+  if (!raw || Object.keys(raw).length === 0) return null;
+  return raw;
+}
+
+async function clearMatchContext(userId) {
+  if (!userId) return;
+  await client.del(`mmctx:${userId}`);
 }
 
 const QUEUE_META_TTL_SECONDS = 600;
@@ -274,11 +370,16 @@ module.exports = {
   // matchmaking
   enqueuePlayer,
   removeFromAllQueues,
+  removeFromQueue,
   popPair,
+  popOpposingPair,
   returnToQueue,
   setQueueMeta,
   getQueueMeta,
   clearQueueMeta,
+  setMatchContext,
+  getMatchContext,
+  clearMatchContext,
   // judge
   getJudgeResult,
   setJudgeResult,

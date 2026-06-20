@@ -20,6 +20,10 @@ const Matchmaking = require('./matchmaking');
 const factCheckRoute = require('./factcheck');
 const coachRoute = require('./coach');
 const judgeRoute = require('./judge');
+const nextQuestionRoute = require('./nextQuestion');
+const rewardsRoute = require('./rewards');
+const shopRoute = require('./shop');
+const shopRotation = require('./shopRotation');
 
 const app = express();
 
@@ -67,6 +71,13 @@ app.get('/', (req, res) => {
 app.use(factCheckRoute.makeRouter());
 app.use(coachRoute.makeRouter());
 app.use(judgeRoute.makeRouter());
+app.use(nextQuestionRoute.makeRouter());
+app.use(rewardsRoute.makeRouter());
+app.use(shopRoute.makeRouter());
+
+// Seed the cosmetic catalog (if empty) and keep the daily/weekly Spark Shop
+// rotations fresh. Deterministic generation means every instance agrees.
+shopRotation.scheduleRotations();
 
 io.on('connection', async (socket) => {
   // userId is supplied by the iOS client through socket.handshake. Falling
@@ -131,9 +142,11 @@ io.on('connection', async (socket) => {
 
   socket.on('leaveGame', async (data) => {
     const payload = Array.isArray(data) ? data[0] : data;
+    const reason = payload?.reason || 'Player has disconnected';
+    console.log(`[leaveGame] userId=${userId} reason=${reason} gameId=${payload?.gameId || 'none'}`);
     try {
       await matchmaking.removePlayer(userId);
-      await gameManager.handleLeaveGame(userId, payload?.reason || 'Player has disconnected');
+      await gameManager.handleLeaveGame(userId, reason);
     } catch (err) {
       console.error('[leaveGame] failed:', err.message);
     }

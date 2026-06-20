@@ -291,11 +291,18 @@ class TopicDebate extends Game {
     this.topicKey = TRENDING_GAME_TYPE;
     this.topicTitle = TRENDING_USA_TITLE;
     this.question = 'Finding a fresh debate topic...';
+    this.questionId = null;
     this.matchRequests = { P1: false, P2: false };
     this.winner = null;
     this.isDraw = false;
     this.createdAt = null;
+    this.startedAt = null;
     this.customDebatePayload = null;
+    // Position-based flow: client chose the question + each player's stance
+    // before matchmaking. Populated by gameManager.createGame.
+    this.preChosenMatch = null;
+    this.player1Position = null;
+    this.player2Position = null;
     ensureFreshCache();
   }
 
@@ -314,6 +321,25 @@ class TopicDebate extends Game {
     this.winner = null;
     this.isDraw = false;
     this.createdAt = Date.now();
+
+    // Position-based flow takes priority: use the client-chosen question and
+    // assign each player their Support/Oppose stance.
+    if (this.preChosenMatch && this.preChosenMatch.question) {
+      const meta = LIVE_TOPIC_META[this.gameType] || LIVE_TOPIC_META[TRENDING_GAME_TYPE];
+      this.topicKey = this.gameType;
+      this.topicTitle = this.preChosenMatch.topicTitle || meta.title;
+      this.question = this.preChosenMatch.question;
+      this.questionId = this.preChosenMatch.questionId || null;
+      const positions = this.preChosenMatch.positions || {};
+      this.player1Position = positions[this.player1Id] || 'support';
+      this.player2Position = positions[this.player2Id] || 'oppose';
+      this.preChosenMatch = null;
+      return {
+        success: true,
+        player1: { id: this.player1Id, symbol: this.player1Symbol },
+        player2: { id: this.player2Id, symbol: this.player2Symbol }
+      };
+    }
 
     if (this.gameType === 'custom' && this.customDebatePayload?.question) {
       this.topicKey = 'custom';
@@ -382,6 +408,9 @@ class TopicDebate extends Game {
       topicKey: this.topicKey,
       topicTitle: this.topicTitle,
       question: this.question,
+      questionId: this.questionId,
+      player1Position: this.player1Position,
+      player2Position: this.player2Position,
       matchRequests: { ...this.matchRequests }
     };
   }
@@ -408,14 +437,18 @@ class TopicDebate extends Game {
       player2Id: this.player2Id,
       player1Symbol: this.player1Symbol,
       player2Symbol: this.player2Symbol,
+      player1Position: this.player1Position,
+      player2Position: this.player2Position,
       phase: this.phase,
       topicKey: this.topicKey,
       topicTitle: this.topicTitle,
       question: this.question,
+      questionId: this.questionId,
       matchRequests: this.matchRequests,
       winner: this.winner,
       isDraw: this.isDraw,
-      createdAt: this.createdAt
+      createdAt: this.createdAt,
+      startedAt: this.startedAt
     };
   }
 
@@ -430,14 +463,18 @@ class TopicDebate extends Game {
     this.player2Id = state.player2Id ?? null;
     this.player1Symbol = state.player1Symbol ?? 'P1';
     this.player2Symbol = state.player2Symbol ?? 'P2';
+    this.player1Position = state.player1Position ?? null;
+    this.player2Position = state.player2Position ?? null;
     this.phase = state.phase ?? 'debating';
     this.topicKey = state.topicKey ?? TRENDING_GAME_TYPE;
     this.topicTitle = state.topicTitle ?? TRENDING_USA_TITLE;
     this.question = state.question ?? 'Finding a fresh debate topic...';
+    this.questionId = state.questionId ?? null;
     this.matchRequests = state.matchRequests ?? { P1: false, P2: false };
     this.winner = state.winner ?? null;
     this.isDraw = state.isDraw ?? false;
     this.createdAt = state.createdAt ?? null;
+    this.startedAt = state.startedAt ?? null;
     return this;
   }
 }

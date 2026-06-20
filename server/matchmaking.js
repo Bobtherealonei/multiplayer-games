@@ -15,10 +15,23 @@ const store = require('./gameStore');
 
 function userRoom(userId) { return `user:${userId}`; }
 
+// How long a player waits for an EXACT opposite-side match on their specific
+// question before we relax to "any opposite side on the same topic".
+const FALLBACK_MS = 9000;
+
+function oppositePosition(position) {
+  return position === 'oppose' ? 'support' : 'oppose';
+}
+
 class Matchmaking {
   constructor(gameManager, io) {
     this.gameManager = gameManager;
     this.io = io;
+    // userId -> setTimeout handle for the exact->topic fallback. LOCAL ONLY
+    // (same rationale as gameManager.pendingDisconnects): when the timer
+    // fires we re-check shared Redis state, so a dead instance just means the
+    // timer never fires and the queue entry eventually goes stale.
+    this.fallbackTimers = new Map();
   }
 
   async addPlayer(socket, gameType, userId, options = {}) {
@@ -27,20 +40,19 @@ class Matchmaking {
       return;
     }
 
-    const queueKey = Matchmaking.queueKeyFor(gameType, options);
-    const resolvedGameType = Matchmaking.gameTypeFromQueueKey(queueKey);
-
-    // Drop any stale queue entries for this user before re-adding — handles
-    // the case where iOS rejoined matchmaking after a soft reconnect or
-    // changed gameType mid-search.
+    // Drop any stale queue entries / context for this user before re-adding —
+    // handles iOS rejoining after a soft reconnect or changing topic mid-search.
     await store.removeFromAllQueues(userId);
+    await store.clearMatchContext(userId);
+    this._clearFallbackTimer(userId);
 
     if (await this.gameManager.isPlayerInGame(userId)) {
       socket.emit('matchmakingStatus', { status: 'alreadyInGame' });
       return;
     }
 
-    if (resolvedGameType === 'custom') {
+    // ── Custom debates: unchanged same-question, same-queue pairing ────────
+    if (gameType === 'custom') {
       if (!options.customDebateId || !options.question) {
         socket.emit('matchmakingStatus', {
           status: 'error',
@@ -48,33 +60,163 @@ class Matchmaking {
         });
         return;
       }
+      const queueKey = `custom:${options.customDebateId}`;
       await store.setQueueMeta(queueKey, {
         customDebateId: options.customDebateId,
         question: options.question,
         topicTitle: options.topicTitle || 'Custom'
       });
+      await store.enqueuePlayer(queueKey, userId);
+      socket.emit('matchmakingStatus', { status: 'searching', gameType: 'custom' });
+      await this.tryMatchmaking(queueKey, 'custom');
+      return;
     }
 
-    await store.enqueuePlayer(queueKey, userId);
-    socket.emit('matchmakingStatus', { status: 'searching', gameType: resolvedGameType });
+    // ── Position-based topic debates ───────────────────────────────────────
+    const position = options.position === 'oppose' ? 'oppose' : 'support';
+    const questionId = String(options.questionId || 'none');
+    const question = options.question || '';
+    const topicTitle = options.topicTitle || '';
 
-    await this.tryMatchmaking(queueKey, resolvedGameType);
+    await store.setMatchContext(userId, { gameType, questionId, question, position, topicTitle });
+
+    const myQueue = Matchmaking.exactQueueKey(gameType, questionId, position);
+    await store.enqueuePlayer(myQueue, userId);
+    socket.emit('matchmakingStatus', { status: 'searching', gameType });
+
+    await this.tryExactMatch(gameType, questionId);
+
+    // If still searching, fall back to topic-wide opposite-side matching.
+    this._scheduleFallback(gameType, userId, position);
   }
 
-  static queueKeyFor(gameType, options = {}) {
-    if (gameType === 'custom' && options.customDebateId) {
-      return `custom:${options.customDebateId}`;
-    }
-    return gameType;
+  static exactQueueKey(gameType, questionId, position) {
+    return `${gameType}::q::${questionId}::${position}`;
   }
 
-  static gameTypeFromQueueKey(queueKey) {
-    if (typeof queueKey === 'string' && queueKey.startsWith('custom:')) return 'custom';
-    return queueKey;
+  static anyQueueKey(gameType, position) {
+    return `${gameType}::any::${position}`;
   }
 
   async removePlayer(userId) {
     await store.removeFromAllQueues(userId);
+    await store.clearMatchContext(userId);
+    this._clearFallbackTimer(userId);
+  }
+
+  _clearFallbackTimer(userId) {
+    const t = this.fallbackTimers.get(userId);
+    if (t) {
+      clearTimeout(t);
+      this.fallbackTimers.delete(userId);
+    }
+  }
+
+  _scheduleFallback(gameType, userId, position) {
+    this._clearFallbackTimer(userId);
+    const handle = setTimeout(async () => {
+      this.fallbackTimers.delete(userId);
+      try {
+        // Still searching? (context cleared on match / leave)
+        const ctx = await store.getMatchContext(userId);
+        if (!ctx) return;
+        if (await this.gameManager.isPlayerInGame(userId)) return;
+        if (!(await this._hasLiveSocket(userId))) {
+          await this.removePlayer(userId);
+          return;
+        }
+        // Move from the exact queue into the topic-wide "any" pool, then try
+        // to pair against any opposite-side waiter on the same topic.
+        await store.removeFromAllQueues(userId);
+        await store.enqueuePlayer(Matchmaking.anyQueueKey(gameType, position), userId);
+        await this.tryAnyMatch(gameType);
+      } catch (err) {
+        console.error('[matchmaking] fallback failed:', err.message);
+      }
+    }, FALLBACK_MS);
+    this.fallbackTimers.set(userId, handle);
+  }
+
+  async tryExactMatch(gameType, questionId) {
+    const supportKey = Matchmaking.exactQueueKey(gameType, questionId, 'support');
+    const opposeKey = Matchmaking.exactQueueKey(gameType, questionId, 'oppose');
+    await this._popAndFinalize(gameType, supportKey, opposeKey);
+  }
+
+  async tryAnyMatch(gameType) {
+    const supportKey = Matchmaking.anyQueueKey(gameType, 'support');
+    const opposeKey = Matchmaking.anyQueueKey(gameType, 'oppose');
+    await this._popAndFinalize(gameType, supportKey, opposeKey);
+  }
+
+  async _popAndFinalize(gameType, supportKey, opposeKey) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const pair = await store.popOpposingPair(supportKey, opposeKey);
+      if (!pair) return; // one side empty — nothing to do
+
+      if (pair.stale) {
+        // Re-seat whichever side survived so a fresh opponent can match it.
+        if (pair.supportUser) await store.returnToQueue(supportKey, pair.supportUser, Date.now());
+        if (pair.opposeUser) await store.returnToQueue(opposeKey, pair.opposeUser, Date.now());
+        continue;
+      }
+
+      const { supportUser, opposeUser } = pair;
+
+      const live = await Promise.all([
+        this._hasLiveSocket(supportUser),
+        this._hasLiveSocket(opposeUser)
+      ]);
+      if (!live[0] && !live[1]) continue;
+      if (!live[0]) { await store.returnToQueue(opposeKey, opposeUser, Date.now()); continue; }
+      if (!live[1]) { await store.returnToQueue(supportKey, supportUser, Date.now()); continue; }
+
+      const ok = await this._finalizeMatch(gameType, supportUser, opposeUser);
+      if (!ok) {
+        // createGame failed — re-seat both and let the clients retry.
+        await store.returnToQueue(supportKey, supportUser, Date.now());
+        await store.returnToQueue(opposeKey, opposeUser, Date.now());
+      }
+      return;
+    }
+  }
+
+  async _finalizeMatch(gameType, supportUser, opposeUser) {
+    const [supportCtx, opposeCtx] = await Promise.all([
+      store.getMatchContext(supportUser),
+      store.getMatchContext(opposeUser)
+    ]);
+
+    // Use the Support player's question as the debate question (deterministic);
+    // fall back to the Oppose player's if Support's is missing.
+    const question = (supportCtx && supportCtx.question) || (opposeCtx && opposeCtx.question) || '';
+    const questionId = (supportCtx && supportCtx.questionId) || (opposeCtx && opposeCtx.questionId) || 'none';
+    const topicTitle = (supportCtx && supportCtx.topicTitle) || (opposeCtx && opposeCtx.topicTitle) || '';
+
+    const matchPayload = {
+      question,
+      questionId: questionId === 'none' ? null : questionId,
+      topicTitle,
+      positions: { [supportUser]: 'support', [opposeUser]: 'oppose' }
+    };
+
+    // Clear search state for both before creating the game.
+    this._clearFallbackTimer(supportUser);
+    this._clearFallbackTimer(opposeUser);
+    await Promise.all([
+      store.clearMatchContext(supportUser),
+      store.clearMatchContext(opposeUser),
+      store.removeFromAllQueues(supportUser),
+      store.removeFromAllQueues(opposeUser)
+    ]);
+
+    try {
+      await this.gameManager.createGame(supportUser, opposeUser, gameType, null, matchPayload);
+      return true;
+    } catch (err) {
+      console.error('[matchmaking] createGame failed:', err.message);
+      return false;
+    }
   }
 
   async tryMatchmaking(queueKey, gameType = Matchmaking.gameTypeFromQueueKey(queueKey)) {
