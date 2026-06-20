@@ -165,10 +165,12 @@ class GameManager {
 
     console.log(`Game created: ${gameId} between ${player1Id} and ${player2Id}`);
 
-    // If the client already chose the question (position-based flow), the
-    // game class has it set — we only need to record it as "seen" for both
-    // players so the next /next-question call doesn't repeat it. Otherwise
-    // (legacy / custom path) kick off the async live-news resolution.
+    if (matchPayload) {
+      this._writeDebateDocument(gameId, gameType, player1Id, player2Id, matchPayload).catch((err) => {
+        console.error('[gameManager] writeDebateDocument failed:', err.message);
+      });
+    }
+
     if (matchPayload && matchPayload.questionId) {
       const db = getDb();
       if (db) {
@@ -185,6 +187,37 @@ class GameManager {
     }
 
     return gameId;
+  }
+
+  async _writeDebateDocument(gameId, gameType, player1Id, player2Id, matchPayload) {
+    const db = getDb();
+    if (!db || !matchPayload) return;
+
+    const admin = getAdmin();
+    const FieldValue = admin.firestore.FieldValue;
+    const positions = matchPayload.positions || {};
+
+    let supportUserId = null;
+    let opposeUserId = null;
+    for (const [uid, pos] of Object.entries(positions)) {
+      if (pos === 'support') supportUserId = uid;
+      if (pos === 'oppose') opposeUserId = uid;
+    }
+
+    await db.collection('debates').doc(gameId).set({
+      gameId,
+      questionId: matchPayload.questionId || null,
+      questionText: matchPayload.question || '',
+      categoryId: matchPayload.categoryId || gameType,
+      topicTitle: matchPayload.topicTitle || null,
+      supportUserId,
+      opposeUserId,
+      player1Id,
+      player2Id,
+      createdAt: FieldValue.serverTimestamp(),
+      status: 'active'
+    });
+    console.log(`[gameManager] debate doc written gameId=${gameId} questionId=${matchPayload.questionId}`);
   }
 
   async _resolveTrendingQuestion(gameId, gameType, player1Id, player2Id) {

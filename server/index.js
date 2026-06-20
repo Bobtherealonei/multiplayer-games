@@ -24,6 +24,7 @@ const nextQuestionRoute = require('./nextQuestion');
 const rewardsRoute = require('./rewards');
 const shopRoute = require('./shop');
 const shopRotation = require('./shopRotation');
+const { scheduleActiveQuestionRotation } = require('./activeDebateQuestion');
 
 const app = express();
 
@@ -78,6 +79,7 @@ app.use(shopRoute.makeRouter());
 // Seed the cosmetic catalog (if empty) and keep the daily/weekly Spark Shop
 // rotations fresh. Deterministic generation means every instance agrees.
 shopRotation.scheduleRotations();
+scheduleActiveQuestionRotation();
 
 io.on('connection', async (socket) => {
   // userId is supplied by the iOS client through socket.handshake. Falling

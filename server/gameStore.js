@@ -278,7 +278,8 @@ async function setMatchContext(userId, ctx) {
     questionId: ctx.questionId || '',
     question: ctx.question || '',
     position: ctx.position || 'support',
-    topicTitle: ctx.topicTitle || ''
+    topicTitle: ctx.topicTitle || '',
+    questionExpiresAt: ctx.questionExpiresAt || ''
   };
   await client.hset(`mmctx:${userId}`, payload);
   await client.expire(`mmctx:${userId}`, MATCH_CONTEXT_TTL_SECONDS);
