@@ -5,7 +5,9 @@
 //
 // Fields per item match the Firestore shopItems/{itemId} schema:
 //   id, name, description, category, rarity, price, imageName, isAnimated,
-//   rotationType ('daily' | 'weekly'), isLimited, colorHex (optional)
+//   rotationType ('daily' | 'weekly' | 'permanent'), isLimited, colorHex (optional)
+//
+// `permanent` items are always visible in the shop (not part of the rotation).
 //
 // `imageName` is an SF Symbol name the iOS client renders as the preview, so
 // no binary art assets are required. `colorHex` tints frames / username colors.
@@ -41,6 +43,14 @@ const CATALOG = [
   // Profile badges
   { id: 'badge_debater', name: 'Debater Badge', description: 'A badge for the dedicated debater.', category: 'badge', rarity: RARITY.COMMON, price: 25, imageName: 'rosette', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#C9A962' },
   { id: 'badge_thinker', name: 'Thinker Badge', description: 'A badge for the deep thinker.', category: 'badge', rarity: RARITY.RARE, price: 40, imageName: 'brain.head.profile', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#5C8AD9' },
+  { id: 'frame_platinum', name: 'Platinum Frame', description: 'A sleek platinum avatar ring.', category: 'frame', rarity: RARITY.COMMON, price: 30, imageName: 'circle', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#B8C4D4' },
+  { id: 'color_rose', name: 'Rose Name', description: 'A soft rose username color.', category: 'usernameColor', rarity: RARITY.COMMON, price: 22, imageName: 'textformat', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#E07A9A' },
+  { id: 'reactions_sparkle', name: 'Spark Reactions', description: 'Sparkles, stars, and hype reactions.', category: 'reaction', rarity: RARITY.COMMON, price: 38, imageName: 'sparkles', isAnimated: false, rotationType: 'daily', isLimited: false },
+  { id: 'badge_spark', name: 'Spark Badge', description: 'A badge that glows with Spark energy.', category: 'badge', rarity: RARITY.COMMON, price: 18, imageName: 'sparkle', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#7EC8FF' },
+  { id: 'entrance_wave', name: 'Wave Entrance', description: 'A friendly wave when you join a debate.', category: 'entranceEffect', rarity: RARITY.COMMON, price: 48, imageName: 'hand.wave.fill', isAnimated: false, rotationType: 'daily', isLimited: false },
+
+  // ── Permanent (always available in the shop) ───────────────────────────
+  { id: 'badge_owner', name: "Owner's Badge", description: 'An exclusive badge for TrendSpark owners — yours for a single Spark.', category: 'badge', rarity: RARITY.LEGENDARY, price: 1, imageName: 'crown.fill', isAnimated: false, rotationType: 'permanent', isLimited: false, colorHex: '#FFD700' },
 
   // ── Weekly items (rotationType: 'weekly', price 75-180) ───────────────
   { id: 'frame_aurora_anim', name: 'Aurora Frame', description: 'An animated aurora avatar ring that shimmers.', category: 'frame', rarity: RARITY.EPIC, price: 120, imageName: 'circle.hexagongrid.fill', isAnimated: true, rotationType: 'weekly', isLimited: false, colorHex: '#7AE0C2' },
@@ -50,7 +60,10 @@ const CATALOG = [
   { id: 'victory_crown', name: 'Crown Victory', description: 'A legendary golden crown victory animation.', category: 'victoryAnimation', rarity: RARITY.LEGENDARY, price: 175, imageName: 'crown.fill', isAnimated: true, rotationType: 'weekly', isLimited: true, colorHex: '#C9A962' },
   { id: 'badge_champion', name: 'Champion Badge', description: 'A rare champion badge for your profile.', category: 'badge', rarity: RARITY.EPIC, price: 95, imageName: 'trophy.fill', isAnimated: false, rotationType: 'weekly', isLimited: false, colorHex: '#C9A962' },
   { id: 'entrance_lightning', name: 'Lightning Entrance', description: 'A limited dramatic lightning entrance.', category: 'entranceEffect', rarity: RARITY.LEGENDARY, price: 160, imageName: 'bolt.fill', isAnimated: true, rotationType: 'weekly', isLimited: true },
-  { id: 'theme_obsidian', name: 'Obsidian Theme', description: 'A sleek obsidian profile theme.', category: 'background', rarity: RARITY.RARE, price: 85, imageName: 'square.stack.3d.up.fill', isAnimated: false, rotationType: 'weekly', isLimited: false, colorHex: '#15151A' }
+  { id: 'theme_obsidian', name: 'Obsidian Theme', description: 'A sleek obsidian profile theme.', category: 'background', rarity: RARITY.RARE, price: 85, imageName: 'square.stack.3d.up.fill', isAnimated: false, rotationType: 'weekly', isLimited: false, colorHex: '#15151A' },
+  { id: 'color_prismatic', name: 'Prismatic Name', description: 'A vivid prismatic username color.', category: 'usernameColor', rarity: RARITY.EPIC, price: 90, imageName: 'textformat', isAnimated: false, rotationType: 'weekly', isLimited: false, colorHex: '#B06CFF' },
+  { id: 'frame_diamond', name: 'Diamond Frame', description: 'A brilliant diamond-cut avatar ring.', category: 'frame', rarity: RARITY.EPIC, price: 145, imageName: 'diamond.fill', isAnimated: true, rotationType: 'weekly', isLimited: false, colorHex: '#E8F4FF' },
+  { id: 'badge_legend', name: 'Legend Badge', description: 'For debaters who never back down.', category: 'badge', rarity: RARITY.LEGENDARY, price: 125, imageName: 'star.circle.fill', isAnimated: false, rotationType: 'weekly', isLimited: false, colorHex: '#FFB347' }
 ];
 
 module.exports = { CATALOG, RARITY };

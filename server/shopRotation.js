@@ -60,8 +60,14 @@ function seededPick(candidates, count, seedKey) {
 // ── Seeding the catalog ───────────────────────────────────────────────────
 async function ensureSeeded(db) {
   const snap = await db.collection('shopItems').limit(1).get();
-  if (!snap.empty) return;
-  console.log('[shop] shopItems empty — seeding catalog');
+  if (snap.empty) {
+    console.log('[shop] shopItems empty — seeding catalog');
+  }
+  await syncCatalog(db);
+}
+
+/** Merge the in-memory catalog into Firestore so new items appear after deploy. */
+async function syncCatalog(db) {
   const batch = db.batch();
   for (const item of CATALOG) {
     batch.set(db.collection('shopItems').doc(item.id), item, { merge: true });
@@ -156,6 +162,7 @@ function scheduleRotations() {
 
 module.exports = {
   ensureSeeded,
+  syncCatalog,
   ensureRotations,
   scheduleRotations,
   generateDaily,
