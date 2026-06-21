@@ -17,6 +17,7 @@ const { pubClient, subClient } = require('./redisClient');
 
 const GameManager = require('./gameManager');
 const Matchmaking = require('./matchmaking');
+const DebateLobbyManager = require('./debateLobby');
 const factCheckRoute = require('./factcheck');
 const coachRoute = require('./coach');
 const judgeRoute = require('./judge');
@@ -24,7 +25,6 @@ const nextQuestionRoute = require('./nextQuestion');
 const rewardsRoute = require('./rewards');
 const shopRoute = require('./shop');
 const shopRotation = require('./shopRotation');
-const { scheduleActiveQuestionRotation } = require('./activeDebateQuestion');
 
 const app = express();
 
@@ -61,7 +61,9 @@ io.adapter(createAdapter(pubClient, subClient));
 console.log('[socket.io] redis adapter installed');
 
 const gameManager = new GameManager(io);
-const matchmaking = new Matchmaking(gameManager, io);
+const lobbyManager = new DebateLobbyManager(io, gameManager, null);
+const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
+lobbyManager.matchmaking = matchmaking;
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -79,7 +81,6 @@ app.use(shopRoute.makeRouter());
 // Seed the cosmetic catalog (if empty) and keep the daily/weekly Spark Shop
 // rotations fresh. Deterministic generation means every instance agrees.
 shopRotation.scheduleRotations();
-scheduleActiveQuestionRotation();
 
 io.on('connection', async (socket) => {
   // userId is supplied by the iOS client through socket.handshake. Falling
@@ -107,9 +108,11 @@ io.on('connection', async (socket) => {
   try {
     if (await gameManager.reattachSocket(userId, socket)) {
       console.log(`  ↳ reattached to active game for userId=${userId}`);
+    } else if (await lobbyManager.reattachLobby(userId, socket)) {
+      console.log(`  ↳ reattached to active lobby for userId=${userId}`);
     }
   } catch (err) {
-    console.error('[connection] reattachSocket failed:', err.message);
+    console.error('[connection] reattach failed:', err.message);
   }
 
   socket.on('findMatch', async (data) => {
@@ -120,6 +123,25 @@ io.on('connection', async (socket) => {
     } catch (err) {
       console.error('[findMatch] failed:', err.message);
       socket.emit('matchmakingStatus', { status: 'error', error: 'Internal error' });
+    }
+  });
+
+  socket.on('submitLobbySelection', async (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    const lobbyId = payload?.lobbyId;
+    const position = payload?.position;
+    if (!lobbyId || !position) {
+      socket.emit('lobbyError', { error: 'lobbyId and position are required' });
+      return;
+    }
+    try {
+      const result = await lobbyManager.submitSelection(userId, lobbyId, position);
+      if (!result.ok) {
+        socket.emit('lobbyError', { lobbyId, error: result.error });
+      }
+    } catch (err) {
+      console.error('[submitLobbySelection] failed:', err.message);
+      socket.emit('lobbyError', { error: 'Internal error' });
     }
   });
 

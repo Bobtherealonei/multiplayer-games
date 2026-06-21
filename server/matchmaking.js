@@ -1,19 +1,17 @@
-// matchmaking.js — pairs players who chose opposite positions on the SAME
-// active questionId for a category.
+// matchmaking.js — player-first matchmaking with pre-debate lobbies.
 //
-// All users entering matchmaking during a rotation window must use the
-// server's current active question (activeDebateQuestions/{gameType}). Exact
-// questionId + opposite position only — no topic-wide fallback.
+// Topic debates: FIFO queue per category → create a temporary lobby where
+// both players privately choose Support/Oppose on a server-selected question.
 
 const store = require('./gameStore');
-const { getActiveQuestion, normalizeDoc, isStillActive } = require('./activeDebateQuestion');
 
 function userRoom(userId) { return `user:${userId}`; }
 
 class Matchmaking {
-  constructor(gameManager, io) {
+  constructor(gameManager, io, lobbyManager) {
     this.gameManager = gameManager;
     this.io = io;
+    this.lobbyManager = lobbyManager;
   }
 
   async addPlayer(socket, gameType, userId, options = {}) {
@@ -22,16 +20,31 @@ class Matchmaking {
       return;
     }
 
-    await store.removeFromAllQueues(userId);
-    await store.clearMatchContext(userId);
-
     if (await this.gameManager.isPlayerInGame(userId)) {
       socket.emit('matchmakingStatus', { status: 'alreadyInGame' });
       return;
     }
 
+    if (await store.isPlayerInLobby(userId)) {
+      socket.emit('matchmakingStatus', { status: 'alreadyInLobby' });
+      return;
+    }
+
+    // Block repeat abandoners from clogging lobbies
+    const abandonCount = await store.getLobbyAbandonCount(userId);
+    if (abandonCount >= 3) {
+      socket.emit('matchmakingStatus', {
+        status: 'error',
+        error: 'Please wait a moment before searching again.'
+      });
+      return;
+    }
+
     // ── Custom debates: unchanged ──────────────────────────────────────────
     if (gameType === 'custom') {
+      await store.removeFromAllQueues(userId);
+      await store.clearAllUserQueueEntries(userId);
+
       if (!options.customDebateId || !options.question) {
         socket.emit('matchmakingStatus', {
           status: 'error',
@@ -51,157 +64,83 @@ class Matchmaking {
       return;
     }
 
-    // ── Position-based topic debates (shared active question) ──────────────
-    const position = options.position === 'oppose' ? 'oppose' : 'support';
-
-    let active;
-    try {
-      active = normalizeDoc(await getActiveQuestion(gameType));
-    } catch (err) {
-      console.error('[matchmaking] getActiveQuestion failed:', err.message);
-      socket.emit('matchmakingStatus', { status: 'error', error: 'Could not load active question' });
-      return;
-    }
-
-    const activeQuestionId = String(active.questionId || 'none');
-    const clientQuestionId = String(options.questionId || '');
-    const clientExpiresAt = Number(options.questionExpiresAt || 0);
-
-    let questionId = activeQuestionId;
-    let question = active.questionText;
-    let topicTitle = active.topicTitle || '';
-
-    if (clientQuestionId) {
-      if (clientQuestionId === activeQuestionId) {
-        // Current active question — use authoritative server text.
-      } else if (clientExpiresAt > Date.now()) {
-        // Previous rotation window: user loaded this question before it expired.
-        questionId = clientQuestionId;
-        question = String(options.question || active.questionText);
-        topicTitle = String(options.topicTitle || active.topicTitle || '');
-        console.log(
-          `[matchmaking] user=${userId} queued on previous questionId=${questionId} expires=${new Date(clientExpiresAt).toISOString()}`
-        );
-      } else {
-        console.log(
-          `[matchmaking] rejected stale question user=${userId} clientQuestionId=${clientQuestionId} activeQuestionId=${activeQuestionId}`
-        );
-        socket.emit('matchmakingStatus', {
-          status: 'questionStale',
-          activeQuestion: {
-            questionId: active.questionId,
-            questionText: active.questionText,
-            question: active.questionText,
-            categoryId: gameType,
-            topicTitle: active.topicTitle,
-            expiresAt: active.expiresAt
-          }
-        });
-        return;
-      }
-    }
-
-    console.log(
-      `[matchmaking] enqueue user=${userId} activeQuestionId=${questionId} position=${position} category=${gameType}`
-    );
-
-    await store.setMatchContext(userId, {
-      gameType,
-      questionId,
-      question,
-      position,
-      topicTitle,
-      questionExpiresAt: String(active.expiresAt || options.questionExpiresAt || '')
-    });
-
-    const myQueue = Matchmaking.exactQueueKey(gameType, questionId, position);
-    await store.enqueuePlayer(myQueue, userId);
-    socket.emit('matchmakingStatus', { status: 'searching', gameType, questionId });
-
-    await this.tryExactMatch(gameType, questionId);
-  }
-
-  static exactQueueKey(gameType, questionId, position) {
-    return `${gameType}::q::${questionId}::${position}`;
-  }
-
-  async removePlayer(userId) {
+    // ── Topic debates: general category queue ────────────────────────────────
     await store.removeFromAllQueues(userId);
-    await store.clearMatchContext(userId);
+    await store.clearAllUserQueueEntries(userId);
+    await store.enqueuePlayer(gameType, userId);
+
+    console.log(`[matchmaking] enqueue user=${userId} category=${gameType}`);
+    socket.emit('matchmakingStatus', { status: 'searching', gameType });
+
+    await this.tryTopicMatchmaking(gameType);
   }
 
-  async tryExactMatch(gameType, questionId) {
-    const supportKey = Matchmaking.exactQueueKey(gameType, questionId, 'support');
-    const opposeKey = Matchmaking.exactQueueKey(gameType, questionId, 'oppose');
-    await this._popAndFinalize(gameType, questionId, supportKey, opposeKey);
+  async requeuePlayer(userId, gameType) {
+    if (!userId || !gameType || gameType === 'custom') return;
+    if (await this.lobbyManager.isPlayerBusy(userId)) return;
+
+    await store.enqueuePlayer(gameType, userId);
+    this.io.to(userRoom(userId)).emit('matchmakingStatus', { status: 'searching', gameType });
+    await this.tryTopicMatchmaking(gameType);
   }
 
-  async _popAndFinalize(gameType, questionId, supportKey, opposeKey) {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const pair = await store.popOpposingPair(supportKey, opposeKey);
+  async tryTopicMatchmaking(gameType) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const pair = await store.popPair(gameType);
       if (!pair) return;
 
       if (pair.stale) {
-        if (pair.supportUser) await store.returnToQueue(supportKey, pair.supportUser, Date.now());
-        if (pair.opposeUser) await store.returnToQueue(opposeKey, pair.opposeUser, Date.now());
+        if (pair.returned) {
+          await store.returnToQueue(gameType, pair.returned, Date.now());
+        }
         continue;
       }
 
-      const { supportUser, opposeUser } = pair;
+      const { user1, user2 } = pair;
+
+      if (await store.shouldAvoidPair(user1, user2)) {
+        await store.returnToQueue(gameType, user1, Date.now());
+        await store.returnToQueue(gameType, user2, Date.now() + 1);
+        continue;
+      }
 
       const live = await Promise.all([
-        this._hasLiveSocket(supportUser),
-        this._hasLiveSocket(opposeUser)
+        this._hasLiveSocket(user1),
+        this._hasLiveSocket(user2)
       ]);
       if (!live[0] && !live[1]) continue;
-      if (!live[0]) { await store.returnToQueue(opposeKey, opposeUser, Date.now()); continue; }
-      if (!live[1]) { await store.returnToQueue(supportKey, supportUser, Date.now()); continue; }
-
-      console.log(
-        `[matchmaking] matched questionId=${questionId} support=${supportUser} oppose=${opposeUser} category=${gameType}`
-      );
-
-      const ok = await this._finalizeMatch(gameType, questionId, supportUser, opposeUser);
-      if (!ok) {
-        await store.returnToQueue(supportKey, supportUser, Date.now());
-        await store.returnToQueue(opposeKey, opposeUser, Date.now());
+      if (!live[0]) {
+        await store.returnToQueue(gameType, user2, Date.now());
+        continue;
       }
-      return;
+      if (!live[1]) {
+        await store.returnToQueue(gameType, user1, Date.now());
+        continue;
+      }
+
+      if (await store.isPlayerInLobby(user1) || await store.isPlayerInLobby(user2)) {
+        await store.returnToQueue(gameType, user1, Date.now());
+        await store.returnToQueue(gameType, user2, Date.now() + 1);
+        continue;
+      }
+
+      try {
+        await this.lobbyManager.createLobby(user1, user2, gameType);
+        return;
+      } catch (err) {
+        console.error('[matchmaking] createLobby failed:', err.message);
+        await Promise.all([
+          store.returnToQueue(gameType, user1, Date.now()),
+          store.returnToQueue(gameType, user2, Date.now() + 1)
+        ]);
+      }
     }
   }
 
-  async _finalizeMatch(gameType, questionId, supportUser, opposeUser) {
-    const [supportCtx, opposeCtx] = await Promise.all([
-      store.getMatchContext(supportUser),
-      store.getMatchContext(opposeUser)
-    ]);
-
-    const question = (supportCtx && supportCtx.question) || (opposeCtx && opposeCtx.question) || '';
-    const resolvedQuestionId = questionId || (supportCtx && supportCtx.questionId) || 'none';
-    const topicTitle = (supportCtx && supportCtx.topicTitle) || (opposeCtx && opposeCtx.topicTitle) || '';
-
-    const matchPayload = {
-      question,
-      questionId: resolvedQuestionId === 'none' ? null : resolvedQuestionId,
-      topicTitle,
-      categoryId: gameType,
-      positions: { [supportUser]: 'support', [opposeUser]: 'oppose' }
-    };
-
-    await Promise.all([
-      store.clearMatchContext(supportUser),
-      store.clearMatchContext(opposeUser),
-      store.removeFromAllQueues(supportUser),
-      store.removeFromAllQueues(opposeUser)
-    ]);
-
-    try {
-      await this.gameManager.createGame(supportUser, opposeUser, gameType, null, matchPayload);
-      return true;
-    } catch (err) {
-      console.error('[matchmaking] createGame failed:', err.message);
-      return false;
-    }
+  async removePlayer(userId) {
+    await this.lobbyManager.leaveLobby(userId);
+    await store.removeFromAllQueues(userId);
+    await store.clearAllUserQueueEntries(userId);
   }
 
   async tryMatchmaking(queueKey, gameType = Matchmaking.gameTypeFromQueueKey(queueKey)) {

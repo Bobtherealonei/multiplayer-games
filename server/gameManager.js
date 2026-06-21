@@ -25,8 +25,9 @@ const {
   TRENDING_GAME_TYPE,
   FALLBACK_QUESTIONS
 } = TopicDebate;
-const { getDb } = require('./firestoreClient');
+const { getDb, getAdmin } = require('./firestoreClient');
 const store = require('./gameStore');
+const { markQuestionDebated } = require('./questionHistory');
 const rewards = require('./rewards');
 
 const RECONNECT_GRACE_MS = 12000;
@@ -177,6 +178,8 @@ class GameManager {
         recordSeen(db, [player1Id, player2Id], matchPayload.questionId).catch((err) => {
           console.warn('[gameManager] recordSeen (preChosen) failed:', err.message);
         });
+        markQuestionDebated(player1Id, matchPayload.questionId).catch(() => {});
+        markQuestionDebated(player2Id, matchPayload.questionId).catch(() => {});
       }
     } else if (!matchPayload && LIVE_GAME_TYPES.has(gameType) && gameType !== 'custom') {
       // Live-news topic with no pre-chosen question? Kick off the Firestore

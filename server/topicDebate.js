@@ -484,6 +484,8 @@ ensureFreshCache();
 module.exports = TopicDebate;
 module.exports.pickTrendingQuestion = pickTrendingQuestion;
 module.exports.recordSeen = recordSeen;
+module.exports.ensureFreshCache = ensureFreshCache;
+module.exports.trendingCaches = trendingCaches;
 module.exports.LIVE_GAME_TYPES = LIVE_GAME_TYPES;
 module.exports.LIVE_TOPIC_META = LIVE_TOPIC_META;
 module.exports.TRENDING_GAME_TYPE = TRENDING_GAME_TYPE;

@@ -5,16 +5,17 @@
 // Firestore: activeDebateQuestions/{gameType}
 //   questionId, questionText, categoryId, topicTitle, startedAt, expiresAt
 //
-// Rotates every ACTIVE_QUESTION_MS (default 15 min). Users already queued on
-// an older questionId keep their Redis queue entries and can still match each
-// other; new entrants always receive the current active question.
+// Rotates every ACTIVE_QUESTION_MS (default 10 min). After each rotation the
+// previous questionId stays matchable for GRACE_PERIOD_MS (default 2 min);
+// new entrants always receive the current active question.
 
 const cron = require('node-cron');
 const { getDb, getAdmin } = require('./firestoreClient');
 const { pickTrendingQuestion, LIVE_TOPIC_META, TRENDING_GAME_TYPE } = require('./topicDebate');
 
 const COLLECTION = 'activeDebateQuestions';
-const ACTIVE_QUESTION_MS = Number(process.env.ACTIVE_QUESTION_MS) || 15 * 60 * 1000;
+const ACTIVE_QUESTION_MS = Number(process.env.ACTIVE_QUESTION_MS) || 10 * 60 * 1000;
+const GRACE_PERIOD_MS = Number(process.env.ACTIVE_QUESTION_GRACE_MS) || 2 * 60 * 1000;
 
 // Topic debate categories (not custom).
 const ROTATING_GAME_TYPES = Object.keys(LIVE_TOPIC_META).filter((t) => t !== 'custom');
@@ -32,13 +33,17 @@ function normalizeDoc(data) {
   if (!data) return null;
   const startedAt = data.startedAt?.toMillis?.() ?? data.startedAt ?? null;
   const expiresAt = data.expiresAt?.toMillis?.() ?? data.expiresAt ?? null;
+  const previousGraceUntil = data.previousGraceUntil?.toMillis?.() ?? data.previousGraceUntil ?? null;
   return {
     questionId: data.questionId ?? null,
     questionText: data.questionText || data.question || '',
     categoryId: data.categoryId || data.gameType || null,
     topicTitle: data.topicTitle || null,
     startedAt,
-    expiresAt
+    expiresAt,
+    previousQuestionId: data.previousQuestionId ?? null,
+    previousQuestionText: data.previousQuestionText || null,
+    previousGraceUntil
   };
 }
 
@@ -90,6 +95,7 @@ async function rotateQuestion(gameType, { force = false } = {}) {
   }
 
   const previousQuestionId = existing?.questionId ?? null;
+  const previousQuestionText = existing?.questionText ?? null;
   const picked = await pickQuestionForRotation(gameType, previousQuestionId);
   const payload = {
     questionId: picked.questionId,
@@ -97,7 +103,10 @@ async function rotateQuestion(gameType, { force = false } = {}) {
     categoryId: gameType,
     topicTitle: picked.topicTitle,
     startedAt: FieldValue.serverTimestamp(),
-    expiresAt: now + ACTIVE_QUESTION_MS
+    expiresAt: now + ACTIVE_QUESTION_MS,
+    previousQuestionId,
+    previousQuestionText,
+    previousGraceUntil: now + GRACE_PERIOD_MS
   };
   await ref.set(payload);
 
@@ -145,8 +154,8 @@ async function ensureAllActiveQuestions() {
 function scheduleActiveQuestionRotation() {
   ensureAllActiveQuestions();
 
-  // Rotate every 15 minutes (all categories).
-  cron.schedule('*/15 * * * *', () => {
+  // Rotate every 10 minutes (all categories).
+  cron.schedule('*/10 * * * *', () => {
     for (const gameType of ROTATING_GAME_TYPES) {
       rotateQuestion(gameType, { force: true }).catch((err) => {
         console.error(`[activeQuestion] cron rotate failed ${gameType}:`, err.message);
@@ -160,6 +169,7 @@ function scheduleActiveQuestionRotation() {
 module.exports = {
   COLLECTION,
   ACTIVE_QUESTION_MS,
+  GRACE_PERIOD_MS,
   ROTATING_GAME_TYPES,
   getActiveQuestion,
   rotateQuestion,

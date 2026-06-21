@@ -26,9 +26,10 @@ const GAME_TTL_SECONDS = 60 * 60;
 // doesn't permanently block that user from joining new debates.
 const PLAYER_GAME_TTL_SECONDS = 60 * 60 * 24;
 
-// 10 minute cap on queue membership; anything stuck longer than this is a
-// bug somewhere upstream and shouldn't keep matching against newcomers.
-const QUEUE_STALE_MS = 10 * 60 * 1000;
+// 5 minute cap on queue membership for multi-question matchmaking.
+const QUEUE_STALE_MS = 5 * 60 * 1000;
+const MAX_USER_QUEUE_ENTRIES = 5;
+const USER_ENTRIES_TTL_SECONDS = 600;
 
 // Atomic "pop two oldest" used by matchmaking. Either we get a pair or
 // nothing — never split. Two instances racing for the same pair is the
@@ -292,9 +293,102 @@ async function getMatchContext(userId) {
   return raw;
 }
 
-async function clearMatchContext(userId) {
+async function clearMatchContext(userId, questionId = null) {
   if (!userId) return;
+  if (questionId) {
+    await client.del(`mmctx:${userId}:${questionId}`);
+    return;
+  }
+  // Legacy single-context key
   await client.del(`mmctx:${userId}`);
+}
+
+async function setMatchContextForQuestion(userId, questionId, ctx) {
+  if (!userId || !questionId || !ctx) return;
+  const payload = {
+    gameType: ctx.gameType || '',
+    questionId: String(questionId),
+    question: ctx.question || '',
+    position: ctx.position || 'support',
+    topicTitle: ctx.topicTitle || '',
+    joinedAt: String(ctx.joinedAt || Date.now())
+  };
+  const k = `mmctx:${userId}:${questionId}`;
+  await client.hset(k, payload);
+  await client.expire(k, USER_ENTRIES_TTL_SECONDS);
+}
+
+async function getMatchContextForQuestion(userId, questionId) {
+  if (!userId || !questionId) return null;
+  const raw = await client.hgetall(`mmctx:${userId}:${questionId}`);
+  if (!raw || Object.keys(raw).length === 0) return null;
+  return raw;
+}
+
+async function getUserQueueQuestionIds(userId) {
+  if (!userId) return [];
+  return client.zrange(`userentries:${userId}`, 0, -1);
+}
+
+async function countUserQueueEntries(userId) {
+  if (!userId) return 0;
+  return client.zcard(`userentries:${userId}`);
+}
+
+async function addUserQueueEntry(userId, questionId, joinedAt = Date.now()) {
+  if (!userId || !questionId) return;
+  await client.zadd(`userentries:${userId}`, joinedAt, String(questionId));
+  await client.expire(`userentries:${userId}`, USER_ENTRIES_TTL_SECONDS);
+}
+
+async function removeUserQueueEntry(userId, questionId) {
+  if (!userId || !questionId) return;
+  await client.pipeline()
+    .zrem(`userentries:${userId}`, String(questionId))
+    .del(`mmctx:${userId}:${questionId}`)
+    .exec();
+}
+
+async function clearAllUserQueueEntries(userId) {
+  if (!userId) return;
+  const ids = await getUserQueueQuestionIds(userId);
+  if (ids.length) {
+    const pipe = client.pipeline();
+    for (const qid of ids) {
+      pipe.del(`mmctx:${userId}:${qid}`);
+    }
+    pipe.del(`userentries:${userId}`);
+    await pipe.exec();
+  } else {
+    await client.del(`userentries:${userId}`);
+  }
+}
+
+/**
+ * Drop queue entries older than QUEUE_STALE_MS and remove from Redis queues.
+ * Returns removed question IDs.
+ */
+async function expireStaleUserEntries(userId) {
+  if (!userId) return [];
+  const withScores = await client.zrange(`userentries:${userId}`, 0, -1, 'WITHSCORES');
+  if (!withScores.length) return [];
+
+  const now = Date.now();
+  const removed = [];
+  for (let i = 0; i < withScores.length; i += 2) {
+    const questionId = withScores[i];
+    const joinedAt = Number(withScores[i + 1]);
+    if (now - joinedAt <= QUEUE_STALE_MS) continue;
+
+    const ctx = await getMatchContextForQuestion(userId, questionId);
+    if (ctx && ctx.gameType && ctx.position) {
+      const suffix = `${ctx.gameType}::q::${questionId}::${ctx.position}`;
+      await removeFromQueue(suffix, userId);
+    }
+    await removeUserQueueEntry(userId, questionId);
+    removed.push(questionId);
+  }
+  return removed;
 }
 
 const QUEUE_META_TTL_SECONDS = 600;
@@ -320,6 +414,80 @@ async function getQueueMeta(queueKey) {
 async function clearQueueMeta(queueKey) {
   if (!queueKey) return;
   await client.del(`queueMeta:${queueKey}`);
+}
+
+// ── Pre-debate lobby ────────────────────────────────────────────────────
+
+const PLAYER_LOBBY_TTL_SECONDS = 120;
+const AVOID_PAIR_TTL_SECONDS = 10 * 60;
+
+async function setPlayerLobby(userId, lobbyId) {
+  if (!userId || !lobbyId) return;
+  await client.set(`player-lobby:${userId}`, lobbyId, 'EX', PLAYER_LOBBY_TTL_SECONDS);
+}
+
+async function getPlayerLobby(userId) {
+  if (!userId) return null;
+  return client.get(`player-lobby:${userId}`);
+}
+
+async function clearPlayerLobby(userId) {
+  if (!userId) return;
+  await client.del(`player-lobby:${userId}`);
+}
+
+async function isPlayerInLobby(userId) {
+  return Boolean(await getPlayerLobby(userId));
+}
+
+function avoidPairKey(userA, userB) {
+  const sorted = [String(userA), String(userB)].sort();
+  return `avoidpair:${sorted[0]}:${sorted[1]}`;
+}
+
+async function addAvoidPair(userA, userB) {
+  if (!userA || !userB) return;
+  await client.set(avoidPairKey(userA, userB), '1', 'EX', AVOID_PAIR_TTL_SECONDS);
+}
+
+async function shouldAvoidPair(userA, userB) {
+  if (!userA || !userB) return false;
+  const val = await client.get(avoidPairKey(userA, userB));
+  return val === '1';
+}
+
+async function setLobbySelection(lobbyId, userId, position) {
+  if (!lobbyId || !userId) return false;
+  const k = `lobbysel:${lobbyId}`;
+  const existing = await client.hget(k, userId);
+  if (existing) return false;
+  await client.hset(k, userId, position);
+  await client.expire(k, PLAYER_LOBBY_TTL_SECONDS);
+  return true;
+}
+
+async function getLobbySelections(lobbyId) {
+  if (!lobbyId) return {};
+  return client.hgetall(`lobbysel:${lobbyId}`);
+}
+
+async function clearLobbySelections(lobbyId) {
+  if (!lobbyId) return;
+  await client.del(`lobbysel:${lobbyId}`);
+}
+
+async function incrementLobbyAbandon(userId) {
+  if (!userId) return 0;
+  const k = `lobby-abandon:${userId}`;
+  const n = await client.incr(k);
+  await client.expire(k, 3600);
+  return n;
+}
+
+async function getLobbyAbandonCount(userId) {
+  if (!userId) return 0;
+  const n = await client.get(`lobby-abandon:${userId}`);
+  return Number(n) || 0;
 }
 
 // ── Judge cache (single-flight) ─────────────────────────────────────────
@@ -381,6 +549,27 @@ module.exports = {
   setMatchContext,
   getMatchContext,
   clearMatchContext,
+  setMatchContextForQuestion,
+  getMatchContextForQuestion,
+  getUserQueueQuestionIds,
+  countUserQueueEntries,
+  addUserQueueEntry,
+  removeUserQueueEntry,
+  clearAllUserQueueEntries,
+  expireStaleUserEntries,
+  MAX_USER_QUEUE_ENTRIES,
+  QUEUE_STALE_MS,
+  setPlayerLobby,
+  getPlayerLobby,
+  clearPlayerLobby,
+  isPlayerInLobby,
+  addAvoidPair,
+  shouldAvoidPair,
+  setLobbySelection,
+  getLobbySelections,
+  clearLobbySelections,
+  incrementLobbyAbandon,
+  getLobbyAbandonCount,
   // judge
   getJudgeResult,
   setJudgeResult,
