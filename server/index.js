@@ -18,6 +18,7 @@ const { pubClient, subClient } = require('./redisClient');
 const GameManager = require('./gameManager');
 const Matchmaking = require('./matchmaking');
 const DebateLobbyManager = require('./debateLobby');
+const store = require('./gameStore');
 const factCheckRoute = require('./factcheck');
 const coachRoute = require('./coach');
 const judgeRoute = require('./judge');
@@ -99,6 +100,7 @@ io.on('connection', async (socket) => {
   // which is delivered by the redis-adapter to whichever instance owns
   // the live socket.
   await socket.join(`user:${userId}`);
+  await store.setPlayerOnline(userId);
 
   // If this user already has an active game (e.g. they had a transient
   // blip and Socket.IO auto-reconnected, possibly to a DIFFERENT instance
@@ -119,6 +121,7 @@ io.on('connection', async (socket) => {
     const payload = Array.isArray(data) ? data[0] : data;
     const gameType = payload?.gameType || 'religion'; // Default to "Trending in the USA"
     try {
+      await store.touchPlayerOnline(userId);
       await matchmaking.addPlayer(socket, gameType, userId, payload || {});
     } catch (err) {
       console.error('[findMatch] failed:', err.message);
@@ -183,6 +186,7 @@ io.on('connection', async (socket) => {
       // try to match against a phantom userId. handleDisconnect schedules
       // the grace-period timer; if the user reconnects within that
       // window (possibly to another instance), the timer is cancelled.
+      await store.clearPlayerOnline(userId);
       await matchmaking.removePlayer(userId);
       await gameManager.handleDisconnect(userId);
     } catch (err) {

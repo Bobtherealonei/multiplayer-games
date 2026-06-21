@@ -26,8 +26,13 @@ class Matchmaking {
     }
 
     if (await store.isPlayerInLobby(userId)) {
-      socket.emit('matchmakingStatus', { status: 'alreadyInLobby' });
-      return;
+      const reattached = await this.lobbyManager.reattachLobby(userId, socket);
+      if (reattached) {
+        socket.emit('matchmakingStatus', { status: 'alreadyInLobby' });
+        return;
+      }
+      // Stale lobby mapping (Firestore doc gone / lobby finished) — clear and re-queue.
+      await store.clearPlayerLobby(userId);
     }
 
     // Block repeat abandoners from clogging lobbies
@@ -67,6 +72,7 @@ class Matchmaking {
     // ── Topic debates: general category queue ────────────────────────────────
     await store.removeFromAllQueues(userId);
     await store.clearAllUserQueueEntries(userId);
+    await store.setPlayerOnline(userId);
     await store.enqueuePlayer(gameType, userId);
 
     console.log(`[matchmaking] enqueue user=${userId} category=${gameType}`);
@@ -75,10 +81,19 @@ class Matchmaking {
     await this.tryTopicMatchmaking(gameType);
   }
 
+  _scheduleTopicRetry(gameType, delayMs = 400) {
+    setTimeout(() => {
+      this.tryTopicMatchmaking(gameType).catch((err) => {
+        console.error('[matchmaking] topic retry failed:', err.message);
+      });
+    }, delayMs);
+  }
+
   async requeuePlayer(userId, gameType) {
     if (!userId || !gameType || gameType === 'custom') return;
     if (await this.lobbyManager.isPlayerBusy(userId)) return;
 
+    await store.setPlayerOnline(userId);
     await store.enqueuePlayer(gameType, userId);
     this.io.to(userRoom(userId)).emit('matchmakingStatus', { status: 'searching', gameType });
     await this.tryTopicMatchmaking(gameType);
@@ -108,14 +123,22 @@ class Matchmaking {
         this._hasLiveSocket(user1),
         this._hasLiveSocket(user2)
       ]);
-      if (!live[0] && !live[1]) continue;
+      if (!live[0] && !live[1]) {
+        // Never drop both waiters — re-queue and retry (fetchSockets can lie).
+        await store.returnToQueue(gameType, user1, Date.now());
+        await store.returnToQueue(gameType, user2, Date.now() + 1);
+        this._scheduleTopicRetry(gameType);
+        return;
+      }
       if (!live[0]) {
         await store.returnToQueue(gameType, user2, Date.now());
-        continue;
+        this._scheduleTopicRetry(gameType);
+        return;
       }
       if (!live[1]) {
         await store.returnToQueue(gameType, user1, Date.now());
-        continue;
+        this._scheduleTopicRetry(gameType);
+        return;
       }
 
       if (await store.isPlayerInLobby(user1) || await store.isPlayerInLobby(user2)) {
@@ -133,6 +156,8 @@ class Matchmaking {
           store.returnToQueue(gameType, user1, Date.now()),
           store.returnToQueue(gameType, user2, Date.now() + 1)
         ]);
+        this._scheduleTopicRetry(gameType, 600);
+        return;
       }
     }
   }
@@ -200,6 +225,7 @@ class Matchmaking {
   }
 
   async _hasLiveSocket(userId) {
+    if (await store.isPlayerOnline(userId)) return true;
     try {
       const sockets = await this.io.in(userRoom(userId)).fetchSockets();
       return sockets.length > 0;

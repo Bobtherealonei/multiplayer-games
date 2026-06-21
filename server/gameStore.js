@@ -490,6 +490,33 @@ async function getLobbyAbandonCount(userId) {
   return Number(n) || 0;
 }
 
+// ── Player online (matchmaking liveness) ────────────────────────────────
+// fetchSockets() across the redis-adapter can be flaky right after connect;
+// we also mark users online in Redis so pairing never silently drops waiters.
+
+const PLAYER_ONLINE_TTL_SECONDS = 180;
+
+async function setPlayerOnline(userId) {
+  if (!userId) return;
+  await client.set(`player-online:${userId}`, '1', 'EX', PLAYER_ONLINE_TTL_SECONDS);
+}
+
+async function touchPlayerOnline(userId) {
+  if (!userId) return;
+  await client.expire(`player-online:${userId}`, PLAYER_ONLINE_TTL_SECONDS);
+}
+
+async function clearPlayerOnline(userId) {
+  if (!userId) return;
+  await client.del(`player-online:${userId}`);
+}
+
+async function isPlayerOnline(userId) {
+  if (!userId) return false;
+  const val = await client.get(`player-online:${userId}`);
+  return val === '1';
+}
+
 // ── Judge cache (single-flight) ─────────────────────────────────────────
 
 const JUDGE_RESULT_TTL_SECONDS = 10 * 60;
@@ -570,6 +597,10 @@ module.exports = {
   clearLobbySelections,
   incrementLobbyAbandon,
   getLobbyAbandonCount,
+  setPlayerOnline,
+  touchPlayerOnline,
+  clearPlayerOnline,
+  isPlayerOnline,
   // judge
   getJudgeResult,
   setJudgeResult,

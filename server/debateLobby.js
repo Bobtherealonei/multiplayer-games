@@ -34,7 +34,10 @@ class DebateLobbyManager {
    */
   async createLobby(player1Id, player2Id, gameType) {
     const db = getDb();
-    if (!db) throw new Error('Firestore unavailable');
+    if (!db) {
+      console.error('[lobby] createLobby failed: Firestore unavailable (set FIREBASE_SERVICE_ACCOUNT_JSON on Render)');
+      throw new Error('Firestore unavailable');
+    }
 
     const lobbyId = `lobby_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     const question = await pickNextQuestionForPair([player1Id, player2Id], gameType);
