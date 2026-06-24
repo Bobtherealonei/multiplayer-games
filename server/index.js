@@ -26,6 +26,7 @@ const nextQuestionRoute = require('./nextQuestion');
 const rewardsRoute = require('./rewards');
 const shopRoute = require('./shop');
 const shopRotation = require('./shopRotation');
+const leaderboardRoute = require('./leaderboard');
 
 const app = express();
 
@@ -78,6 +79,7 @@ app.use(judgeRoute.makeRouter());
 app.use(nextQuestionRoute.makeRouter());
 app.use(rewardsRoute.makeRouter());
 app.use(shopRoute.makeRouter());
+app.use(leaderboardRoute.makeRouter());
 
 // Seed the cosmetic catalog (if empty) and keep the daily/weekly Spark Shop
 // rotations fresh. Deterministic generation means every instance agrees.
