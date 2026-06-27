@@ -68,7 +68,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'no-abandon-cooldown-2';
+const SERVER_VERSION = 'random-sides-3';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {

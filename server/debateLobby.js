@@ -1,5 +1,4 @@
-// debateLobby.js — pre-debate lobby: pair players first, show a shared
-// question, collect private Support/Oppose selections, then start or cancel.
+// debateLobby.js — pair players, pick a question, randomly assign sides, start.
 
 const store = require('./gameStore');
 const { getDb, getAdmin } = require('./firestoreClient');
@@ -29,68 +28,53 @@ class DebateLobbyManager {
     return false;
   }
 
+  _randomSelections(player1Id, player2Id) {
+    if (Math.random() < 0.5) {
+      return { [player1Id]: 'support', [player2Id]: 'oppose' };
+    }
+    return { [player1Id]: 'oppose', [player2Id]: 'support' };
+  }
+
   /**
-   * Create a pre-debate lobby for two matched players.
+   * Match two players, pick a question, assign random sides, and start the debate.
    */
   async createLobby(player1Id, player2Id, gameType) {
-    const db = getDb();
-    if (!db) {
-      console.error('[lobby] createLobby failed: Firestore unavailable (set FIREBASE_SERVICE_ACCOUNT_JSON on Render)');
-      throw new Error('Firestore unavailable');
-    }
-
-    const lobbyId = `lobby_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     const question = await pickNextQuestionForPair([player1Id, player2Id], gameType);
-    const now = Date.now();
-    const selectionDeadline = now + SELECTION_MS;
-
-    const admin = getAdmin();
-    const FieldValue = admin.firestore.FieldValue;
-
-    const lobbyDoc = {
-      lobbyId,
-      playerIds: [player1Id, player2Id],
-      questionId: question.questionId,
-      questionText: question.questionText,
-      categoryId: gameType,
-      topicTitle: question.topicTitle || null,
-      selectionCount: 0,
-      status: 'waitingForSelections',
-      createdAt: FieldValue.serverTimestamp(),
-      selectionDeadline,
-      debateId: null
-    };
-
-    await db.collection(COLLECTION).doc(lobbyId).set(lobbyDoc);
-
-    await Promise.all([
-      store.setPlayerLobby(player1Id, lobbyId),
-      store.setPlayerLobby(player2Id, lobbyId),
-      store.clearLobbySelections(lobbyId)
-    ]);
+    const selections = this._randomSelections(player1Id, player2Id);
 
     recordQuestionShown(player1Id, question.questionId).catch(() => {});
     recordQuestionShown(player2Id, question.questionId).catch(() => {});
 
-    const payload = {
-      lobbyId,
+    let supportUserId = null;
+    let opposeUserId = null;
+    for (const [uid, pos] of Object.entries(selections)) {
+      if (pos === 'support') supportUserId = uid;
+      if (pos === 'oppose') opposeUserId = uid;
+    }
+    if (!supportUserId || !opposeUserId) {
+      throw new Error('Failed to assign random sides');
+    }
+
+    const matchPayload = {
+      question: question.questionText,
       questionId: question.questionId,
-      questionText: question.questionText,
-      categoryId: gameType,
       topicTitle: question.topicTitle,
-      selectionDeadline,
-      status: 'waitingForSelections'
+      categoryId: gameType,
+      positions: selections
     };
 
-    this.io.to(userRoom(player1Id)).emit('lobbyCreated', payload);
-    this.io.to(userRoom(player2Id)).emit('lobbyCreated', payload);
-
-    this._scheduleSelectionTimeout(lobbyId, player1Id, player2Id, gameType, selectionDeadline);
+    const gameId = await this.gameManager.createGame(
+      supportUserId,
+      opposeUserId,
+      gameType,
+      null,
+      matchPayload
+    );
 
     console.log(
-      `[lobby] created lobbyId=${lobbyId} p1=${player1Id} p2=${player2Id} questionId=${question.questionId}`
+      `[lobby] matched gameId=${gameId} p1=${player1Id} p2=${player2Id} questionId=${question.questionId} sides=${JSON.stringify(selections)}`
     );
-    return lobbyId;
+    return gameId;
   }
 
   _scheduleSelectionTimeout(lobbyId, player1Id, player2Id, gameType, selectionDeadline) {
@@ -201,7 +185,9 @@ class DebateLobbyManager {
       return true;
     });
 
-    if (!claimed) return;
+    if (!claimed) {
+      throw new Error('Lobby claim failed');
+    }
 
     const matchPayload = {
       question: lobbyData.questionText,
@@ -231,7 +217,7 @@ class DebateLobbyManager {
       await ref.update({ status: 'cancelled' });
       await this.matchmaking.requeuePlayer(player1Id, gameType);
       await this.matchmaking.requeuePlayer(player2Id, gameType);
-      return;
+      throw err;
     }
 
     const admin = getAdmin();
@@ -254,6 +240,7 @@ class DebateLobbyManager {
     }
 
     console.log(`[lobby] debate started lobbyId=${lobbyId} gameId=${gameId}`);
+    return gameId;
   }
 
   async _handleSamePosition(lobbyId, lobbyData, player1Id, player2Id) {

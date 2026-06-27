@@ -1,7 +1,6 @@
-// matchmaking.js — player-first matchmaking with pre-debate lobbies.
+// matchmaking.js — player-first matchmaking.
 //
-// Topic debates: FIFO queue per category → create a temporary lobby where
-// both players privately choose Support/Oppose on a server-selected question.
+// Topic debates: FIFO queue per category → random Support/Oppose → gameFound.
 
 const store = require('./gameStore');
 
