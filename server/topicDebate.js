@@ -22,6 +22,7 @@
 
 const Game = require('./game');
 const { getDb, getAdmin } = require('./firestoreClient');
+const { ensureShouldQuestion } = require('./debateQuestionFormat');
 
 const CACHE_TTL_MS = 2 * 60 * 1000;
 // Pool per topic — big on purpose. With per-user dedup against seen list,
@@ -43,34 +44,34 @@ const LIVE_TOPIC_META = {
     topic: 'trendingUSA',
     title: 'Trending in the USA',
     fallbacks: [
-      'Is the U.S. response to the current conflict in the Middle East the right move?',
-      'Are current U.S. foreign policy decisions making America stronger or weaker?',
-      'Is the media covering today\'s biggest stories fairly?',
-      'Should the U.S. be more involved in what is happening internationally right now?',
-      'Is the government handling the economy the right way?'
+      'Should the U.S. take a more forceful military response in the Middle East?',
+      'Should U.S. foreign policy prioritize strength over diplomacy?',
+      'Should the media change how it covers today\'s biggest stories?',
+      'Should the U.S. increase its involvement in international conflicts?',
+      'Should the government change its current economic policies?'
     ]
   },
   currentPolitics: {
     topic: 'politicsWorld',
     title: 'Politics around the World',
     fallbacks: [
-      'Is the West\'s response to the war in Ukraine still the right approach?',
-      'Should the U.N. have more power to step in during international conflicts?',
-      'Is global democracy in decline?',
-      'Are economic sanctions an effective foreign policy tool?',
-      'Should countries open their borders more or close them tighter?'
+      'Should the West continue its current approach in Ukraine?',
+      'Should the U.N. have more power to intervene in international conflicts?',
+      'Should democracies do more to reverse the global decline in democratic norms?',
+      'Should countries rely more on economic sanctions as a foreign policy tool?',
+      'Should countries open their borders more widely to immigrants?'
     ]
   },
   sportsDebate: {
     topic: 'sports',
     title: 'Sports',
     fallbacks: [
-      'Is winning more important than sportsmanship?',
-      'Should college athletes be paid more?',
-      'Are athletes overpaid?',
-      'Should performance-enhancing drug users be permanently banned?',
-      'Are dynasties good for sports?',
-      'Is team loyalty more important than going where you can win?'
+      'Should winning be valued more than sportsmanship?',
+      'Should college athletes be paid salaries?',
+      'Should professional athletes accept lower pay?',
+      'Should athletes who use performance-enhancing drugs be permanently banned?',
+      'Should sports leagues encourage dynasties?',
+      'Should athletes prioritize team loyalty over winning championships?'
     ]
   },
   // aiFuture + collegeCareers don't come from RSS, but the data-collector
@@ -81,14 +82,14 @@ const LIVE_TOPIC_META = {
     topic: 'aiFuture',
     title: 'AI and the Future',
     fallbacks: [
-      'Will AI create more jobs than it destroys over the next decade?',
-      'Is AI more helpful than dangerous right now?',
-      'Should AI be heavily regulated by governments?',
-      'Will AI make school and college degrees less valuable?',
-      'Could AI become smarter than humans in a dangerous way?',
-      'Should companies have to tell you when you are talking to AI?',
-      'Will AI improve daily life more than it harms privacy?',
-      'Is society moving too fast with AI development?'
+      'Should society accept that AI will destroy more jobs than it creates over the next decade?',
+      'Should AI development be paused until safety is proven?',
+      'Should governments heavily regulate AI?',
+      'Should colleges de-emphasize degrees because of AI?',
+      'Should we limit AI research to prevent superintelligence risks?',
+      'Should companies be required to disclose when you are talking to AI?',
+      'Should privacy protections be strengthened as AI spreads?',
+      'Should society slow down AI development?'
     ]
   },
   custom: {
@@ -154,7 +155,10 @@ async function refreshAllCachesFromFirestore() {
       // 24h turnover after deploy.
       const t = data.topic || 'trendingUSA';
       if (buckets[t]) {
-        buckets[t].push({ id: doc.id, question: data.debateQuestion });
+        buckets[t].push({
+          id: doc.id,
+          question: ensureShouldQuestion(data.debateQuestion)
+        });
       }
     });
 
@@ -235,7 +239,9 @@ function randomStaticQuestion(gameType) {
   return {
     topicKey: gameType,
     topicTitle: topic.title,
-    question: topic.questions[Math.floor(Math.random() * topic.questions.length)],
+    question: ensureShouldQuestion(
+      topic.questions[Math.floor(Math.random() * topic.questions.length)]
+    ),
     questionId: null
   };
 }
@@ -249,7 +255,9 @@ async function pickTrendingQuestion(playerIds, gameType) {
     return {
       topicKey: gameType,
       topicTitle: meta.title,
-      question: meta.fallbacks[Math.floor(Math.random() * meta.fallbacks.length)],
+      question: ensureShouldQuestion(
+        meta.fallbacks[Math.floor(Math.random() * meta.fallbacks.length)]
+      ),
       questionId: null
     };
   }
@@ -269,7 +277,7 @@ async function pickTrendingQuestion(playerIds, gameType) {
   return {
     topicKey: gameType,
     topicTitle: meta.title,
-    question: chosen.question,
+    question: ensureShouldQuestion(chosen.question),
     questionId: chosen.id
   };
 }
@@ -292,7 +300,7 @@ class TopicDebate extends Game {
     this.topicTitle = TRENDING_USA_TITLE;
     this.question = 'Finding a fresh debate topic...';
     this.questionId = null;
-    this.matchRequests = { P1: false, P2: false };
+    this.matchRequests = { P1: null, P2: null };
     this.winner = null;
     this.isDraw = false;
     this.createdAt = null;
@@ -317,7 +325,7 @@ class TopicDebate extends Game {
     this.player1Symbol = 'P1';
     this.player2Symbol = 'P2';
     this.phase = 'debating';
-    this.matchRequests = { P1: false, P2: false };
+    this.matchRequests = { P1: null, P2: null };
     this.winner = null;
     this.isDraw = false;
     this.createdAt = Date.now();
@@ -421,7 +429,7 @@ class TopicDebate extends Game {
     super.cleanup();
     this.phase = 'debating';
     this.question = '';
-    this.matchRequests = { P1: false, P2: false };
+    this.matchRequests = { P1: null, P2: null };
     this.winner = null;
     this.isDraw = false;
   }
@@ -470,7 +478,7 @@ class TopicDebate extends Game {
     this.topicTitle = state.topicTitle ?? TRENDING_USA_TITLE;
     this.question = state.question ?? 'Finding a fresh debate topic...';
     this.questionId = state.questionId ?? null;
-    this.matchRequests = state.matchRequests ?? { P1: false, P2: false };
+    this.matchRequests = state.matchRequests ?? { P1: null, P2: null };
     this.winner = state.winner ?? null;
     this.isDraw = state.isDraw ?? false;
     this.createdAt = state.createdAt ?? null;

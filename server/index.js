@@ -67,9 +67,12 @@ const lobbyManager = new DebateLobbyManager(io, gameManager, null);
 const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
+// Bump this on every deploy-relevant change so `/` confirms what Render runs.
+const SERVER_VERSION = 'no-abandon-cooldown-2';
+
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
-  res.status(200).send('OK');
+  res.status(200).json({ status: 'OK', version: SERVER_VERSION });
 });
 
 // LLM proxy routes (keys live only in Render env vars).
@@ -178,6 +181,16 @@ io.on('connection', async (socket) => {
       await gameManager.handleLeaveGame(userId, reason);
     } catch (err) {
       console.error('[leaveGame] failed:', err.message);
+    }
+  });
+
+  socket.on('passMatch', async (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    console.log(`[passMatch] userId=${userId} gameId=${payload?.gameId || 'none'}`);
+    try {
+      await gameManager.handlePassMatch(userId, payload?.gameId);
+    } catch (err) {
+      console.error('[passMatch] failed:', err.message);
     }
   });
 

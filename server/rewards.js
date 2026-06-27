@@ -13,11 +13,12 @@
 //   never double-award.
 //
 // REWARD RULES (from the product spec)
-//   Rank tokens (competitive, can't be spent):
-//     win  +10 | loss -8 (floor 0) | draw +1 each
-//   Spark tokens (spendable, never removed on loss):
-//     completion +2 (always) | win +8 more | draw +2 more (=> 4 total)
-//     first completed debate of the day +3 | 3rd completed debate of day +4
+//   Rank tokens (competitive trophies — can't be spent):
+//     win  +10 | loss -8 (floor 0) | draw 0
+//   Spark tokens (spendable):
+//     win: +2 completion, +8 win bonus, daily bonuses (first of day +3, 3rd of day +4)
+//     loss: 0
+//     draw: +1 total (no rank tokens, no daily bonuses)
 //   A debate with no official result (never started / abandoned pre-start) is
 //   skipped entirely.
 
@@ -28,10 +29,9 @@ const { dayKey } = require('./timeUtil');
 
 const RANK_WIN = 10;
 const RANK_LOSS = 8;
-const RANK_DRAW = 1;
 const SPARK_COMPLETION = 2;
 const SPARK_WIN_BONUS = 8;
-const SPARK_DRAW_BONUS = 2; // 2 completion + 2 => 4 total on a draw
+const SPARK_DRAW = 1;
 const SPARK_FIRST_OF_DAY = 3;
 const SPARK_THREE_IN_DAY = 4;
 
@@ -54,7 +54,7 @@ function computePlayerRewards(role, current, todayKey, debateId) {
   // ── Rank ──
   if (role === 'win') rankDelta = RANK_WIN;
   else if (role === 'loss') rankDelta = -RANK_LOSS;
-  else rankDelta = RANK_DRAW;
+  // draw: no rank/trophy change
 
   const newRank = Math.max(0, current.rankTokens + rankDelta);
   // Record the ACTUAL applied change (floor at 0 may shrink a loss).
@@ -63,33 +63,35 @@ function computePlayerRewards(role, current, todayKey, debateId) {
     history.push({
       tokenType: 'rank',
       amount: appliedRank,
-      reason: role === 'win' ? 'debate_win' : role === 'loss' ? 'debate_loss' : 'debate_draw',
+      reason: role === 'win' ? 'debate_win' : 'debate_loss',
       debateId
     });
   }
 
-  // ── Spark (never negative) ──
-  sparkDelta += SPARK_COMPLETION;
-  history.push({ tokenType: 'spark', amount: SPARK_COMPLETION, reason: 'debate_completion', debateId });
-
+  // ── Spark ──
   if (role === 'win') {
+    sparkDelta += SPARK_COMPLETION;
+    history.push({ tokenType: 'spark', amount: SPARK_COMPLETION, reason: 'debate_completion', debateId });
     sparkDelta += SPARK_WIN_BONUS;
     history.push({ tokenType: 'spark', amount: SPARK_WIN_BONUS, reason: 'debate_win_bonus', debateId });
   } else if (role === 'draw') {
-    sparkDelta += SPARK_DRAW_BONUS;
-    history.push({ tokenType: 'spark', amount: SPARK_DRAW_BONUS, reason: 'debate_draw_bonus', debateId });
+    sparkDelta += SPARK_DRAW;
+    history.push({ tokenType: 'spark', amount: SPARK_DRAW, reason: 'debate_draw', debateId });
   }
+  // loss: no spark tokens
 
-  // Daily bonuses.
+  // Daily bonuses — wins only.
   const isFirstToday = current.lastDebateDay !== todayKey;
   const newCount = isFirstToday ? 1 : current.debatesToday + 1;
-  if (isFirstToday) {
-    sparkDelta += SPARK_FIRST_OF_DAY;
-    history.push({ tokenType: 'spark', amount: SPARK_FIRST_OF_DAY, reason: 'first_debate_of_day', debateId });
-  }
-  if (newCount === 3) {
-    sparkDelta += SPARK_THREE_IN_DAY;
-    history.push({ tokenType: 'spark', amount: SPARK_THREE_IN_DAY, reason: 'three_debates_in_day', debateId });
+  if (role === 'win') {
+    if (isFirstToday) {
+      sparkDelta += SPARK_FIRST_OF_DAY;
+      history.push({ tokenType: 'spark', amount: SPARK_FIRST_OF_DAY, reason: 'first_debate_of_day', debateId });
+    }
+    if (newCount === 3) {
+      sparkDelta += SPARK_THREE_IN_DAY;
+      history.push({ tokenType: 'spark', amount: SPARK_THREE_IN_DAY, reason: 'three_debates_in_day', debateId });
+    }
   }
 
   const newSpark = current.sparkTokens + sparkDelta;

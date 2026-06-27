@@ -8,13 +8,22 @@ const { getDb } = require('./firestoreClient');
 
 const LIMIT = 10;
 
-function displayNameFromProfile(data, fallback) {
-  if (!data || typeof data !== 'object') return fallback;
-  const username = typeof data.username === 'string' ? data.username.trim() : '';
-  if (username) return username.slice(0, 60);
-  const name = typeof data.name === 'string' ? data.name.trim() : '';
-  if (name) return name.slice(0, 60);
+function nameFromProfile(profile, userData, fallback) {
+  if (profile && typeof profile === 'object') {
+    const fromPublic = typeof profile.name === 'string' ? profile.name.trim() : '';
+    if (fromPublic) return fromPublic.slice(0, 60);
+  }
+  if (userData && typeof userData === 'object') {
+    const fromUser = typeof userData.name === 'string' ? userData.name.trim() : '';
+    if (fromUser) return fromUser.slice(0, 60);
+  }
   return fallback;
+}
+
+function usernameFromProfile(data) {
+  if (!data || typeof data !== 'object') return null;
+  const username = typeof data.username === 'string' ? data.username.trim() : '';
+  return username ? username.slice(0, 60) : null;
 }
 
 function profileImageFromProfile(data) {
@@ -49,8 +58,14 @@ async function fetchTopDebaters() {
       rank: index + 1,
       userId: doc.id,
       trophies,
-      username: `Player ${index + 1}`,
+      name: null,
+      displayName: `Player ${index + 1}`,
+      username: null,
       profileImageURL: null,
+      equippedBadgeId: null,
+      equippedFrameId: null,
+      equippedUsernameColorId: null,
+      _userData: data,
     });
     profileRefs.push(db.collection('publicProfiles').doc(doc.id));
   });
@@ -61,8 +76,18 @@ async function fetchTopDebaters() {
 
   profileSnaps.forEach((snap, index) => {
     const profile = snap.exists ? snap.data() : null;
-    entries[index].username = displayNameFromProfile(profile, entries[index].username);
+    const userData = entries[index]._userData || null;
+    const resolvedName = nameFromProfile(profile, userData, null);
+    entries[index].name = resolvedName;
+    entries[index].displayName = resolvedName || entries[index].displayName;
+    entries[index].username = usernameFromProfile(profile);
     entries[index].profileImageURL = profileImageFromProfile(profile);
+    if (profile) {
+      entries[index].equippedBadgeId = profile.equippedBadgeId || null;
+      entries[index].equippedFrameId = profile.equippedFrameId || null;
+      entries[index].equippedUsernameColorId = profile.equippedUsernameColorId || null;
+    }
+    delete entries[index]._userData;
   });
 
   return entries;

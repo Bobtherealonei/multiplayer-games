@@ -35,15 +35,9 @@ class Matchmaking {
       await store.clearPlayerLobby(userId);
     }
 
-    // Block repeat abandoners from clogging lobbies
-    const abandonCount = await store.getLobbyAbandonCount(userId);
-    if (abandonCount >= 3) {
-      socket.emit('matchmakingStatus', {
-        status: 'error',
-        error: 'Please wait a moment before searching again.'
-      });
-      return;
-    }
+    // Instant topic matching no longer uses selection lobbies, so the old
+    // abandon penalty just strands real users. Clear any stale strikes.
+    await store.clearLobbyAbandonCount(userId);
 
     // ── Custom debates: unchanged ──────────────────────────────────────────
     if (gameType === 'custom') {

@@ -273,6 +273,15 @@ class GameManager {
     if (result.success) {
       await store.saveGameState(gameId, game.serialize());
       await this.sendGameState(gameId, game);
+      if (data && data.readyToMatch === false) {
+        const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+        if (otherId) {
+          this.io.to(userRoom(otherId)).emit('opponentSkipped', {
+            message: 'The other player skipped',
+            gameId
+          });
+        }
+      }
     } else {
       // moveError is per-user feedback, not a broadcast.
       this.io.to(userRoom(playerId)).emit('moveError', { error: result.error });
@@ -351,6 +360,17 @@ class GameManager {
   async handleLeaveGame(playerId, message = 'Player has disconnected') {
     const gameId = await store.getPlayerGame(playerId);
     if (!gameId) return;
+
+    const state = await store.loadGameState(gameId);
+    if (state) {
+      const game = this._hydrate(state);
+      const sym = game?.symbolFor?.(playerId);
+      if (sym && game.matchRequests?.[sym] === false) {
+        await this.handlePassMatch(playerId, gameId);
+        return;
+      }
+    }
+
     // If the debate had already started, quitting counts as a loss for the
     // quitter and a win for the opponent. Process BEFORE teardown so the game
     // state (player IDs, startedAt) is still in Redis. Idempotent.
@@ -360,6 +380,42 @@ class GameManager {
       console.error('[gameManager] forfeit (leave) failed:', err.message);
     }
     this.io.to(gameRoom(gameId)).emit('playerLeft', { message, gameId });
+    await this.endGame(gameId);
+  }
+
+  // Player tapped Pass after the debate — notify the opponent and tear down the room.
+  async handlePassMatch(playerId, gameIdFromPayload = null) {
+    const gameId = gameIdFromPayload || (await store.getPlayerGame(playerId));
+    if (!gameId) return;
+
+    let otherId = null;
+    const state = await store.loadGameState(gameId);
+    if (state) {
+      otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+      const game = this._hydrate(state);
+      if (game) {
+        const sym = game.symbolFor(playerId);
+        if (sym && game.matchRequests[sym] !== false) {
+          game.makeMove(playerId, { readyToMatch: false });
+          await store.saveGameState(gameId, game.serialize());
+          await this.sendGameState(gameId, game);
+        }
+      }
+    }
+
+    const pending = this.pendingDisconnects.get(playerId);
+    if (pending) {
+      clearTimeout(pending);
+      this.pendingDisconnects.delete(playerId);
+    }
+
+    if (otherId) {
+      this.io.to(userRoom(otherId)).emit('opponentSkipped', {
+        message: 'The other player skipped',
+        gameId
+      });
+    }
+
     await this.endGame(gameId);
   }
 
@@ -380,6 +436,13 @@ class GameManager {
         // expiry, etc.), nothing to do.
         const state = await store.loadGameState(gameId);
         if (!state) return;
+
+        const game = this._hydrate(state);
+        const sym = game?.symbolFor?.(playerId);
+        if (sym && game.matchRequests?.[sym] === false) {
+          await this.handlePassMatch(playerId, gameId);
+          return;
+        }
 
         // Cross-instance reconnection check. If the user has any live
         // socket anywhere in the cluster, treat them as reconnected.

@@ -5,6 +5,7 @@ const { client } = require('./redisClient');
 const { LIVE_TOPIC_META, TRENDING_GAME_TYPE, ensureFreshCache, trendingCaches } = require('./topicDebate');
 const { getExcludedQuestionIds } = require('./questionHistory');
 const store = require('./gameStore');
+const { ensureShouldQuestion } = require('./debateQuestionFormat');
 
 const IMBALANCE_PENALTY_THRESHOLD = 5;
 const SESSION_TTL_SECONDS = 4 * 60 * 60;
@@ -95,7 +96,7 @@ async function pickNextQuestionForUser(userId, gameType) {
     await addSessionShown(userId, gameType, questionId);
     return {
       questionId,
-      questionText: text,
+      questionText: ensureShouldQuestion(text),
       categoryId: gameType,
       topicTitle: meta.title
     };
@@ -121,7 +122,7 @@ async function pickNextQuestionForUser(userId, gameType) {
 
   return {
     questionId: pick.item.id,
-    questionText: pick.item.question,
+    questionText: ensureShouldQuestion(pick.item.question),
     categoryId: gameType,
     topicTitle: meta.title
   };
@@ -160,7 +161,7 @@ async function pickNextQuestionForPair(userIds, gameType) {
     }
     return {
       questionId,
-      questionText: text,
+      questionText: ensureShouldQuestion(text),
       categoryId: gameType,
       topicTitle: meta.title
     };
@@ -172,7 +173,7 @@ async function pickNextQuestionForPair(userIds, gameType) {
   }
   return {
     questionId: pick.id,
-    questionText: pick.question,
+    questionText: ensureShouldQuestion(pick.question),
     categoryId: gameType,
     topicTitle: meta.title
   };

@@ -490,6 +490,11 @@ async function getLobbyAbandonCount(userId) {
   return Number(n) || 0;
 }
 
+async function clearLobbyAbandonCount(userId) {
+  if (!userId) return;
+  await client.del(`lobby-abandon:${userId}`);
+}
+
 // ── Player online (matchmaking liveness) ────────────────────────────────
 // fetchSockets() across the redis-adapter can be flaky right after connect;
 // we also mark users online in Redis so pairing never silently drops waiters.
@@ -597,6 +602,7 @@ module.exports = {
   clearLobbySelections,
   incrementLobbyAbandon,
   getLobbyAbandonCount,
+  clearLobbyAbandonCount,
   setPlayerOnline,
   touchPlayerOnline,
   clearPlayerOnline,
