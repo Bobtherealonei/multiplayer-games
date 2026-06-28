@@ -150,10 +150,17 @@ async function refreshAllCachesFromFirestore() {
     snap.forEach((doc) => {
       const data = doc.data();
       if (!data.debateQuestion) return;
-      // Legacy docs (pre-multi-topic) don't have a `topic` field — treat
-      // them as trendingUSA so existing matches don't go empty during the
-      // 24h turnover after deploy.
-      const t = data.topic || 'trendingUSA';
+      // Legacy docs (pre-multi-topic) don't have a `topic` field — route by
+      // category when possible so sports/world items don't land in trendingUSA.
+      let t = data.topic;
+      if (!t) {
+        if (data.category === 'sports') t = 'sports';
+        else if (data.category === 'politics' || data.category === 'intl' || data.category === 'war') {
+          t = 'politicsWorld';
+        } else {
+          t = 'trendingUSA';
+        }
+      }
       if (buckets[t]) {
         buckets[t].push({
           id: doc.id,
