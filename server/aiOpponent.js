@@ -8,14 +8,14 @@ const AI_OPPONENT_NAME = 'AI Debater';
 
 const FALLBACK_REPLIES = {
   support: [
-    'I hear your point, but the benefits here clearly outweigh the downsides.',
-    'That ignores the stronger evidence on the support side of this question.',
-    'Fair pushback — still, supporting this position protects what matters most.',
+    "I get that, but I still think the upside here is worth it.",
+    "Maybe — but supporting this protects the people who need it most.",
+    "That's fair, though the support side has the stronger case here.",
   ],
   oppose: [
-    'I see where you are coming from, but the risks on the other side are too serious.',
-    'That argument overlooks the core problem with supporting this idea.',
-    'Respectfully, the oppose side has the stronger case when you look at the facts.',
+    "I hear you, but the risks here are just too big to ignore.",
+    "Maybe, but opposing this is the safer call when you look closer.",
+    "That's one take — I still think the oppose side makes more sense.",
   ],
 };
 
@@ -32,6 +32,31 @@ function stancePrompt(position) {
 function pickFallback(position) {
   const pool = FALLBACK_REPLIES[position] || FALLBACK_REPLIES.oppose;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+/** Keep replies chat-sized: 1–2 sentences, no paragraph dumps. */
+function trimToHumanReply(text) {
+  if (!text || typeof text !== 'string') return text;
+
+  let cleaned = text
+    .replace(/^["']|["']$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) return cleaned;
+
+  // Split on sentence boundaries; keep at most two sentences.
+  const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
+  cleaned = sentences.slice(0, 2).join(' ').trim();
+
+  // Hard cap so a runaway model still fits debate chat.
+  const maxChars = 220;
+  if (cleaned.length > maxChars) {
+    cleaned = cleaned.slice(0, maxChars).replace(/\s+\S*$/, '').trim();
+    if (!/[.!?]$/.test(cleaned)) cleaned += '.';
+  }
+
+  return cleaned;
 }
 
 async function generateDebateReply({
@@ -53,13 +78,16 @@ async function generateDebateReply({
     .trim();
 
   const system = [
-    'You are a skilled, respectful debate opponent in the Trendspark app.',
+    'You are a real person debating in a fast mobile chat — not writing an essay.',
     stancePrompt(aiPosition),
     `Debate topic: ${topicTitle || 'General'}`,
     `Question: ${question}`,
     humanPosition ? `Your opponent is on the ${humanPosition} side.` : '',
-    'Reply in 1-3 short sentences. Sound natural, confident, and conversational.',
-    'No markdown, bullet points, or labels. Do not mention being an AI.',
+    'Write EXACTLY 1–2 short sentences. Max ~25 words total unless you absolutely need a third short phrase.',
+    'Sound like texting: casual, direct, a little personality. Contractions are fine.',
+    'One clear point per message. No lists, no headers, no "Firstly/Secondly", no long setup.',
+    'Never write more than two sentences. Never use paragraph breaks.',
+    'Do not mention being an AI.',
   ]
     .filter(Boolean)
     .join('\n');
@@ -77,8 +105,8 @@ async function generateDebateReply({
       },
       body: JSON.stringify({
         model: MODEL,
-        temperature: 0.85,
-        max_tokens: 180,
+        temperature: 0.9,
+        max_tokens: 70,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent },
@@ -95,7 +123,7 @@ async function generateDebateReply({
     const data = await resp.json();
     const text = data?.choices?.[0]?.message?.content?.trim();
     if (!text) return pickFallback(aiPosition);
-    return text.replace(/^["']|["']$/g, '');
+    return trimToHumanReply(text) || pickFallback(aiPosition);
   } catch (err) {
     console.error('[aiOpponent] generateDebateReply failed:', err.message);
     return pickFallback(aiPosition);
