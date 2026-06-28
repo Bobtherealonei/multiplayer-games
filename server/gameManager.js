@@ -29,7 +29,7 @@ const { getDb, getAdmin } = require('./firestoreClient');
 const store = require('./gameStore');
 const { markQuestionDebated } = require('./questionHistory');
 const rewards = require('./rewards');
-const { AI_OPPONENT_ID, AI_OPPONENT_NAME, generateDebateReply } = require('./aiOpponent');
+const { AI_OPPONENT_ID, pickRandomAIPersona, generateDebateReply } = require('./aiOpponent');
 const { pickNextQuestionForPair } = require('./questionPicker');
 
 const RECONNECT_GRACE_MS = 12000;
@@ -132,6 +132,9 @@ class GameManager {
     if (isAIGame) {
       serialized.isAIGame = true;
       serialized.chatLog = [];
+      if (gameOptions.aiPersona) {
+        serialized.aiPersona = gameOptions.aiPersona;
+      }
     }
     await store.saveGameState(gameId, serialized);
 
@@ -150,11 +153,13 @@ class GameManager {
       await this._writeDebateDocument(gameId, gameType, player1Id, player2Id, matchPayload);
     }
 
-    const aiMeta = isAIGame
+    const aiPersona = gameOptions.aiPersona || serialized.aiPersona;
+    const aiMeta = isAIGame && aiPersona
       ? {
           isAIOpponent: true,
-          opponentName: AI_OPPONENT_NAME,
-          opponentImageURL: null,
+          opponentName: aiPersona.displayName,
+          opponentUsername: aiPersona.username,
+          opponentImageURL: aiPersona.imageURL,
         }
       : {};
 
@@ -244,13 +249,14 @@ class GameManager {
       };
     }
 
+    const aiPersona = pickRandomAIPersona();
     const gameId = await this.createGame(
       humanId,
       AI_OPPONENT_ID,
       gameType,
       customPayload,
       matchPayload,
-      { isAIGame: true }
+      { isAIGame: true, aiPersona }
     );
     console.log(`[gameManager] AI game created gameId=${gameId} human=${humanId} type=${gameType}`);
     return gameId;

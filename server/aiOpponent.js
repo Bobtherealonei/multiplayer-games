@@ -4,7 +4,23 @@ const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 const MODEL = 'gpt-4o-mini';
 
 const AI_OPPONENT_ID = '__trendspark_ai_opponent__';
-const AI_OPPONENT_NAME = 'AI Debater';
+
+const AI_FIRST_NAMES = [
+  'Jordan', 'Maya', 'Alex', 'Riley', 'Sam', 'Taylor', 'Chris', 'Ava',
+  'Leo', 'Quinn', 'Jamie', 'Casey', 'Drew', 'Noah', 'Zoe', 'Marcus',
+  'Priya', 'Ethan', 'Luna', 'Kai', 'Nina', 'Omar', 'Sage', 'Elliot',
+];
+
+function pickRandomAIPersona() {
+  const first = AI_FIRST_NAMES[Math.floor(Math.random() * AI_FIRST_NAMES.length)];
+  const displayName = first;
+  const tag = Math.floor(Math.random() * 9000) + 100;
+  const username = `@${first.toLowerCase()}${tag}`;
+  const gender = Math.random() < 0.5 ? 'men' : 'women';
+  const portraitId = Math.floor(Math.random() * 99);
+  const imageURL = `https://randomuser.me/api/portraits/${gender}/${portraitId}.jpg`;
+  return { displayName, username, imageURL };
+}
 
 const FALLBACK_REPLIES = {
   support: [
@@ -170,6 +186,6 @@ async function generateDebateReply({
 
 module.exports = {
   AI_OPPONENT_ID,
-  AI_OPPONENT_NAME,
+  pickRandomAIPersona,
   generateDebateReply,
 };
