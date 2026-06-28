@@ -29,6 +29,8 @@ const { getDb, getAdmin } = require('./firestoreClient');
 const store = require('./gameStore');
 const { markQuestionDebated } = require('./questionHistory');
 const rewards = require('./rewards');
+const { AI_OPPONENT_ID, AI_OPPONENT_NAME, generateDebateReply } = require('./aiOpponent');
+const { pickNextQuestionForPair } = require('./questionPicker');
 
 const RECONNECT_GRACE_MS = 12000;
 
@@ -105,10 +107,11 @@ class GameManager {
   //   { question, questionId, topicTitle, positions: { [uid]: 'support'|'oppose' } }
   // When present we use that question verbatim and skip the async live-news
   // resolution below.
-  async createGame(player1Id, player2Id, gameType, customPayload = null, matchPayload = null) {
+  async createGame(player1Id, player2Id, gameType, customPayload = null, matchPayload = null, gameOptions = {}) {
     const GameClass = this.gameFactories.get(gameType);
     if (!GameClass) throw new Error(`Unknown game type: ${gameType}`);
 
+    const isAIGame = Boolean(gameOptions.isAIGame);
     const gameId = `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const game = new GameClass();
     game.gameId = gameId;
@@ -125,12 +128,17 @@ class GameManager {
       { id: player2Id }
     ]);
 
-    // Persist initial state + bind both players to this game.
-    await store.saveGameState(gameId, game.serialize());
-    await Promise.all([
-      store.setPlayerGame(player1Id, gameId),
-      store.setPlayerGame(player2Id, gameId)
-    ]);
+    const serialized = game.serialize();
+    if (isAIGame) {
+      serialized.isAIGame = true;
+      serialized.chatLog = [];
+    }
+    await store.saveGameState(gameId, serialized);
+
+    const playerGameWrites = [];
+    if (player1Id !== AI_OPPONENT_ID) playerGameWrites.push(store.setPlayerGame(player1Id, gameId));
+    if (player2Id !== AI_OPPONENT_ID) playerGameWrites.push(store.setPlayerGame(player2Id, gameId));
+    await Promise.all(playerGameWrites);
 
     await this._joinPlayersToGameRoom(gameId, player1Id, player2Id);
 
@@ -138,48 +146,58 @@ class GameManager {
     const p1Position = game.player1Position || null;
     const p2Position = game.player2Position || null;
 
-    // Dispatch the per-user `gameFound` events. Each player needs to know
-    // their own symbol AND the opponent's id, which is asymmetric, so we
-    // emit twice — once per user room.
-    this.io.to(userRoom(player1Id)).emit('gameFound', {
-      gameId,
-      symbol: initResult.player1.symbol,
-      opponentUid: player2Id,
-      opponent: player2Id, // legacy
-      gameType,
-      position: p1Position,
-      opponentPosition: p2Position,
-      question: game.question
-    });
-    this.io.to(userRoom(player2Id)).emit('gameFound', {
-      gameId,
-      symbol: initResult.player2.symbol,
-      opponentUid: player1Id,
-      opponent: player1Id, // legacy
-      gameType,
-      position: p2Position,
-      opponentPosition: p1Position,
-      question: game.question
-    });
+    if (matchPayload) {
+      await this._writeDebateDocument(gameId, gameType, player1Id, player2Id, matchPayload);
+    }
+
+    const aiMeta = isAIGame
+      ? {
+          isAIOpponent: true,
+          opponentName: AI_OPPONENT_NAME,
+          opponentImageURL: null,
+        }
+      : {};
+
+    if (player1Id !== AI_OPPONENT_ID) {
+      this.io.to(userRoom(player1Id)).emit('gameFound', {
+        gameId,
+        symbol: initResult.player1.symbol,
+        opponentUid: player2Id,
+        opponent: player2Id, // legacy
+        gameType,
+        position: p1Position,
+        opponentPosition: p2Position,
+        question: game.question,
+        ...aiMeta,
+      });
+    }
+    if (player2Id !== AI_OPPONENT_ID) {
+      this.io.to(userRoom(player2Id)).emit('gameFound', {
+        gameId,
+        symbol: initResult.player2.symbol,
+        opponentUid: player1Id,
+        opponent: player1Id, // legacy
+        gameType,
+        position: p2Position,
+        opponentPosition: p1Position,
+        question: game.question,
+      });
+    }
 
     await this.sendGameState(gameId, game);
 
     console.log(`Game created: ${gameId} between ${player1Id} and ${player2Id}`);
 
-    if (matchPayload) {
-      this._writeDebateDocument(gameId, gameType, player1Id, player2Id, matchPayload).catch((err) => {
-        console.error('[gameManager] writeDebateDocument failed:', err.message);
-      });
-    }
-
     if (matchPayload && matchPayload.questionId) {
       const db = getDb();
       if (db) {
-        recordSeen(db, [player1Id, player2Id], matchPayload.questionId).catch((err) => {
+        const humanIds = [player1Id, player2Id].filter((id) => id && id !== AI_OPPONENT_ID);
+        recordSeen(db, humanIds, matchPayload.questionId).catch((err) => {
           console.warn('[gameManager] recordSeen (preChosen) failed:', err.message);
         });
-        markQuestionDebated(player1Id, matchPayload.questionId).catch(() => {});
-        markQuestionDebated(player2Id, matchPayload.questionId).catch(() => {});
+        for (const uid of humanIds) {
+          markQuestionDebated(uid, matchPayload.questionId).catch(() => {});
+        }
       }
     } else if (!matchPayload && LIVE_GAME_TYPES.has(gameType) && gameType !== 'custom') {
       // Live-news topic with no pre-chosen question? Kick off the Firestore
@@ -189,6 +207,52 @@ class GameManager {
       });
     }
 
+    return gameId;
+  }
+
+  async createAIGame(humanId, gameType, options = {}) {
+    if (!humanId) throw new Error('humanId is required');
+    if (await this.isPlayerInGame(humanId)) {
+      throw new Error('Player already in a game');
+    }
+
+    await store.removeFromAllQueues(humanId);
+    await store.clearAllUserQueueEntries(humanId);
+
+    let matchPayload = null;
+    let customPayload = null;
+
+    if (gameType === 'custom') {
+      if (!options.question) throw new Error('question is required for custom AI debates');
+      customPayload = {
+        customDebateId: options.customDebateId,
+        question: options.question,
+        topicTitle: options.topicTitle || 'Custom',
+      };
+    } else {
+      const question = await pickNextQuestionForPair([humanId], gameType);
+      const positions =
+        Math.random() < 0.5
+          ? { [humanId]: 'support', [AI_OPPONENT_ID]: 'oppose' }
+          : { [humanId]: 'oppose', [AI_OPPONENT_ID]: 'support' };
+      matchPayload = {
+        question: question.questionText,
+        questionId: question.questionId,
+        topicTitle: question.topicTitle,
+        categoryId: gameType,
+        positions,
+      };
+    }
+
+    const gameId = await this.createGame(
+      humanId,
+      AI_OPPONENT_ID,
+      gameType,
+      customPayload,
+      matchPayload,
+      { isAIGame: true }
+    );
+    console.log(`[gameManager] AI game created gameId=${gameId} human=${humanId} type=${gameType}`);
     return gameId;
   }
 
@@ -288,7 +352,7 @@ class GameManager {
     }
   }
 
-  // Chat: relay only to the OTHER player. Game room minus sender.
+  // Chat: relay to the other human player, or generate an AI reply.
   async handleChat(playerId, payload) {
     const gameId = payload?.gameId || (await store.getPlayerGame(playerId));
     if (!gameId) return;
@@ -298,19 +362,51 @@ class GameManager {
     const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
     if (!otherId) return;
 
-    // First message marks the debate as "started" — only started debates pay
-    // out tokens / count as a forfeit if abandoned (see rewards.js).
-    if (!state.startedAt) {
-      await store.patchGameState(gameId, { startedAt: Date.now() });
+    const chatLog = [...(state.chatLog || []), { symbol: payload?.symbol, text: payload?.message }];
+    const startedAt = state.startedAt || Date.now();
+    await store.patchGameState(gameId, { chatLog, startedAt });
+
+    const isAIGame = Boolean(state.isAIGame) || otherId === AI_OPPONENT_ID;
+    if (!isAIGame) {
+      this.io.to(userRoom(otherId)).emit('chatMessage', {
+        message: payload?.message,
+        sender: payload?.sender,
+        symbol: payload?.symbol,
+        gameId,
+        playerId,
+      });
+      return;
     }
 
-    this.io.to(userRoom(otherId)).emit('chatMessage', {
-      message: payload?.message,
-      sender: payload?.sender,
-      symbol: payload?.symbol,
-      gameId,
-      playerId
-    });
+    const aiSymbol = state.player1Id === AI_OPPONENT_ID ? state.player1Symbol : state.player2Symbol;
+    const aiPosition = state.player1Id === AI_OPPONENT_ID ? state.player1Position : state.player2Position;
+    const humanPosition = state.player1Id === playerId ? state.player1Position : state.player2Position;
+
+    try {
+      const reply = await generateDebateReply({
+        question: state.question,
+        topicTitle: state.topicTitle,
+        aiPosition,
+        humanPosition,
+        chatLog,
+        humanMessage: payload?.message,
+      });
+      if (!reply) return;
+
+      await store.patchGameState(gameId, {
+        chatLog: [...chatLog, { symbol: aiSymbol, text: reply }],
+      });
+
+      this.io.to(userRoom(playerId)).emit('chatMessage', {
+        message: reply,
+        sender: aiSymbol,
+        symbol: aiSymbol,
+        gameId,
+        playerId: AI_OPPONENT_ID,
+      });
+    } catch (err) {
+      console.error('[gameManager] AI chat reply failed:', err.message);
+    }
   }
 
   // Caller may already have a hydrated game instance (saves a Redis read).

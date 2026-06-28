@@ -134,6 +134,20 @@ io.on('connection', async (socket) => {
     }
   });
 
+  socket.on('matchWithAI', async (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    const gameType = payload?.gameType || 'religion';
+    try {
+      await store.touchPlayerOnline(userId);
+      await matchmaking.removePlayer(userId);
+      await gameManager.createAIGame(userId, gameType, payload || {});
+      socket.emit('matchmakingStatus', { status: 'aiMatched', gameType });
+    } catch (err) {
+      console.error('[matchWithAI] failed:', err.message);
+      socket.emit('matchmakingStatus', { status: 'error', error: 'Could not start AI debate' });
+    }
+  });
+
   socket.on('submitLobbySelection', async (data) => {
     const payload = Array.isArray(data) ? data[0] : data;
     const lobbyId = payload?.lobbyId;
