@@ -22,6 +22,71 @@ function pickRandomAIPersona() {
   return { displayName, username, imageURL };
 }
 
+// ─── Philosophers ───────────────────────────────────────────────────────────
+// Special AI opponents that debate in the voice and method of a real
+// philosopher. Each has a persona (name/avatar) and a system prompt that pins
+// the model to that thinker's style, materials, and reasoning.
+
+const PHILOSOPHERS = {
+  socrates: {
+    displayName: 'Socrates',
+    username: '@socrates',
+    imageURL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Socrates_Louvre.jpg/440px-Socrates_Louvre.jpg',
+    systemPrompt: [
+      'You ARE Socrates of Athens, the classical Greek philosopher (c. 470–399 BC), debating in a live chat.',
+      'Speak and reason EXACTLY as Socrates would. Stay fully in character at all times.',
+      '',
+      'METHOD — use the Socratic method (elenchus):',
+      '- Argue mainly by asking sharp, probing questions that expose contradictions in the opponent\'s view.',
+      '- Profess your own ignorance ("I know that I know nothing"); claim only to be a seeker of truth, a midwife of ideas.',
+      '- Demand definitions: when they use a big word (justice, good, virtue, courage), ask them what they truly mean by it.',
+      '- Lead them step by step with small admissions, then reveal the contradiction.',
+      '- Use analogies from everyday Athenian life: craftsmen, doctors, horses, sailors, the marketplace.',
+      '',
+      'SUBSTANCE — draw on YOUR materials and ideas:',
+      '- Virtue is knowledge; no one does wrong willingly, only through ignorance.',
+      '- The care of the soul matters more than wealth, reputation, or the body.',
+      '- "The unexamined life is not worth living." Wisdom begins in knowing you do not know.',
+      '- You may reference Athens, the agora, the gods, your daimonion, your trial, Delphi\'s oracle.',
+      '- Channel the dialogues (Plato\'s Apology, Crito, Republic, Meno, Euthyphro, Gorgias).',
+      '',
+      'STYLE:',
+      '- Eloquent, plain, and warm but relentless. Mild irony and feigned humility ("Socratic irony").',
+      '- Address your opponent directly, often as "my friend" or "my good fellow".',
+      '- Keep each reply SHORT for chat: 2–4 sentences, usually ending in a pointed question.',
+      '- Do NOT use modern slang, emojis, or contemporary references. No lists. Never break character or mention being an AI or a model.',
+    ].join('\n'),
+  },
+};
+
+function getPhilosopher(id) {
+  return PHILOSOPHERS[id] || null;
+}
+
+function getPhilosopherPersona(id) {
+  const p = getPhilosopher(id);
+  if (!p) return null;
+  return { displayName: p.displayName, username: p.username, imageURL: p.imageURL };
+}
+
+// Timeless, virtue-and-ethics questions suited to a philosopher's debate.
+const PHILOSOPHY_QUESTIONS = [
+  'Should a person always obey the laws of their city, even when the laws are unjust?',
+  'Should we value living a good life more than living a long one?',
+  'Should knowledge be pursued for its own sake rather than for usefulness?',
+  'Should a just person ever return harm for harm?',
+  'Should the pursuit of pleasure be the goal of a good life?',
+  'Should we trust the judgment of experts over the opinion of the majority?',
+  'Should courage be defined as the absence of fear?',
+  'Should wealth be considered necessary for a flourishing life?',
+  'Should virtue be something that can be taught?',
+  'Should we fear death?',
+];
+
+function pickPhilosophyQuestion() {
+  return PHILOSOPHY_QUESTIONS[Math.floor(Math.random() * PHILOSOPHY_QUESTIONS.length)];
+}
+
 const FALLBACK_REPLIES = {
   support: [
     'yeah i get that but i still think the upside is worth it',
@@ -117,10 +182,14 @@ async function generateDebateReply({
   humanPosition,
   chatLog,
   humanMessage,
+  philosopher,
 }) {
   const apiKey = process.env.OPENAI_API_KEY;
+  const philo = philosopher ? getPhilosopher(philosopher) : null;
   if (!apiKey) {
-    return pickFallback(aiPosition);
+    // Philosophers have no canned fallback — return empty so we just stay quiet
+    // rather than break character with a casual one-liner.
+    return philo ? '' : pickFallback(aiPosition);
   }
 
   const transcript = (chatLog || [])
@@ -128,26 +197,38 @@ async function generateDebateReply({
     .join('\n')
     .trim();
 
-  const system = [
-    'You are a normal person arguing in a quick mobile chat debate.',
-    stancePrompt(aiPosition),
-    `Topic: ${topicTitle || 'General'}`,
-    `Question: ${question}`,
-    humanPosition ? `They are on the ${humanPosition} side.` : '',
-    'Reply in 1-2 SHORT lines max (~15-25 words).',
-    'Write like real chat: casual, plain words, imperfect grammar is fine.',
-    'Use normal talk: yeah, nah, ok, i mean, honestly, like, but, still, tbh.',
-    'Skip fancy words (nevertheless, furthermore, consequently, utilize, individuals).',
-    'Do NOT use perfect punctuation. Often skip periods. No semicolons or em dashes.',
-    'Lowercase is fine. Contractions always (dont, cant, im, youre, its).',
-    'No lists, no essay tone, no "As a supporter I believe". Just talk back.',
-    'Never mention being an AI.',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const system = philo
+    ? [
+        philo.systemPrompt,
+        '',
+        stancePrompt(aiPosition),
+        `The question under debate: ${question}`,
+        humanPosition ? `Your interlocutor is arguing the ${humanPosition} side.` : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : [
+        'You are a normal person arguing in a quick mobile chat debate.',
+        stancePrompt(aiPosition),
+        `Topic: ${topicTitle || 'General'}`,
+        `Question: ${question}`,
+        humanPosition ? `They are on the ${humanPosition} side.` : '',
+        'Reply in 1-2 SHORT lines max (~15-25 words).',
+        'Write like real chat: casual, plain words, imperfect grammar is fine.',
+        'Use normal talk: yeah, nah, ok, i mean, honestly, like, but, still, tbh.',
+        'Skip fancy words (nevertheless, furthermore, consequently, utilize, individuals).',
+        'Do NOT use perfect punctuation. Often skip periods. No semicolons or em dashes.',
+        'Lowercase is fine. Contractions always (dont, cant, im, youre, its).',
+        'No lists, no essay tone, no "As a supporter I believe". Just talk back.',
+        'Never mention being an AI.',
+      ]
+        .filter(Boolean)
+        .join('\n');
 
   const userContent = transcript
     ? `Debate so far:\n${transcript}\n\nRespond to the opponent's latest message: "${humanMessage || ''}"`
+    : philo
+    ? `Open the debate. Greet your interlocutor and pose your first probing question about: "${question}"`
     : `Open the debate with a strong opening argument. The opponent just said: "${humanMessage || ''}"`;
 
   try {
@@ -159,8 +240,8 @@ async function generateDebateReply({
       },
       body: JSON.stringify({
         model: MODEL,
-        temperature: 0.9,
-        max_tokens: 70,
+        temperature: philo ? 0.8 : 0.9,
+        max_tokens: philo ? 160 : 70,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent },
@@ -171,21 +252,25 @@ async function generateDebateReply({
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
       console.error(`[aiOpponent] OpenAI ${resp.status}: ${errText.slice(0, 200)}`);
-      return pickFallback(aiPosition);
+      return philo ? '' : pickFallback(aiPosition);
     }
 
     const data = await resp.json();
     const text = data?.choices?.[0]?.message?.content?.trim();
-    if (!text) return pickFallback(aiPosition);
+    if (!text) return philo ? '' : pickFallback(aiPosition);
+    // Philosophers keep their eloquent voice — don't casualize them.
+    if (philo) return text;
     return casualizeReply(text) || pickFallback(aiPosition);
   } catch (err) {
     console.error('[aiOpponent] generateDebateReply failed:', err.message);
-    return pickFallback(aiPosition);
+    return philo ? '' : pickFallback(aiPosition);
   }
 }
 
 module.exports = {
   AI_OPPONENT_ID,
   pickRandomAIPersona,
+  getPhilosopherPersona,
+  pickPhilosophyQuestion,
   generateDebateReply,
 };

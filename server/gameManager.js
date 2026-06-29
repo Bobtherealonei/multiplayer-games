@@ -29,7 +29,13 @@ const { getDb, getAdmin } = require('./firestoreClient');
 const store = require('./gameStore');
 const { markQuestionDebated } = require('./questionHistory');
 const rewards = require('./rewards');
-const { AI_OPPONENT_ID, pickRandomAIPersona, generateDebateReply } = require('./aiOpponent');
+const {
+  AI_OPPONENT_ID,
+  pickRandomAIPersona,
+  getPhilosopherPersona,
+  pickPhilosophyQuestion,
+  generateDebateReply,
+} = require('./aiOpponent');
 const { pickNextQuestionForPair } = require('./questionPicker');
 
 const RECONNECT_GRACE_MS = 12000;
@@ -135,6 +141,9 @@ class GameManager {
       if (gameOptions.aiPersona) {
         serialized.aiPersona = gameOptions.aiPersona;
       }
+      if (gameOptions.philosopher) {
+        serialized.philosopher = gameOptions.philosopher;
+      }
     }
     await store.saveGameState(gameId, serialized);
 
@@ -227,7 +236,25 @@ class GameManager {
     let matchPayload = null;
     let customPayload = null;
 
-    if (gameType === 'custom') {
+    const philosopher = options.philosopher || null;
+    const philosopherPersona = philosopher ? getPhilosopherPersona(philosopher) : null;
+
+    if (philosopher && philosopherPersona) {
+      // Philosopher debates use their own timeless question set and always
+      // pit the human against the philosopher persona.
+      const questionText = pickPhilosophyQuestion();
+      const positions =
+        Math.random() < 0.5
+          ? { [humanId]: 'support', [AI_OPPONENT_ID]: 'oppose' }
+          : { [humanId]: 'oppose', [AI_OPPONENT_ID]: 'support' };
+      matchPayload = {
+        question: questionText,
+        questionId: null,
+        topicTitle: philosopherPersona.displayName,
+        categoryId: gameType,
+        positions,
+      };
+    } else if (gameType === 'custom') {
       if (!options.question) throw new Error('question is required for custom AI debates');
       customPayload = {
         customDebateId: options.customDebateId,
@@ -249,16 +276,16 @@ class GameManager {
       };
     }
 
-    const aiPersona = pickRandomAIPersona();
+    const aiPersona = philosopherPersona || pickRandomAIPersona();
     const gameId = await this.createGame(
       humanId,
       AI_OPPONENT_ID,
       gameType,
       customPayload,
       matchPayload,
-      { isAIGame: true, aiPersona }
+      { isAIGame: true, aiPersona, philosopher: philosopherPersona ? philosopher : null }
     );
-    console.log(`[gameManager] AI game created gameId=${gameId} human=${humanId} type=${gameType}`);
+    console.log(`[gameManager] AI game created gameId=${gameId} human=${humanId} type=${gameType} philosopher=${philosopher || 'none'}`);
     return gameId;
   }
 
@@ -396,6 +423,7 @@ class GameManager {
         humanPosition,
         chatLog,
         humanMessage: payload?.message,
+        philosopher: state.philosopher || null,
       });
       if (!reply) return;
 
