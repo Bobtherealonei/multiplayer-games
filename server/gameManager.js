@@ -240,16 +240,26 @@ class GameManager {
     const philosopherPersona = philosopher ? getPhilosopherPersona(philosopher) : null;
 
     if (philosopher && philosopherPersona) {
-      // Philosopher debates use their own timeless question set and always
-      // pit the human against the philosopher persona.
-      const questionText = pickPhilosophyQuestion();
+      // Philosopher debates argue MODERN topics / current events, but in the
+      // philosopher's own voice. Pull a live trending question; fall back to a
+      // timeless one only if the pool is empty.
+      let questionText;
+      let questionId = null;
+      try {
+        const q = await pickNextQuestionForPair([humanId], gameType);
+        questionText = q.questionText;
+        questionId = q.questionId;
+      } catch (err) {
+        console.warn('[gameManager] philosopher trending pick failed, using fallback:', err.message);
+        questionText = pickPhilosophyQuestion();
+      }
       const positions =
         Math.random() < 0.5
           ? { [humanId]: 'support', [AI_OPPONENT_ID]: 'oppose' }
           : { [humanId]: 'oppose', [AI_OPPONENT_ID]: 'support' };
       matchPayload = {
         question: questionText,
-        questionId: null,
+        questionId,
         topicTitle: philosopherPersona.displayName,
         categoryId: gameType,
         positions,
