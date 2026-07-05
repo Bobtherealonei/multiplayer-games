@@ -42,7 +42,7 @@ const PHILOSOPHER_COMMON = [
   '- Do not repeat an argument you already made earlier in the debate.',
   '',
   'LENGTH — VERY IMPORTANT:',
-  '- Reply with 2–3 sentences. Never more. This is a fast chat, not a lecture.',
+  '- Reply with 2 short sentences. Never more. This is a fast chat, not a lecture.',
   '- No lists. Never break character. Never mention being an AI, a model, or the modern date.',
 ].join('\n');
 
@@ -177,9 +177,9 @@ function trimToHumanReply(text) {
   if (!cleaned) return cleaned;
 
   const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
-  cleaned = sentences.slice(0, 4).join(' ').trim();
+  cleaned = sentences.slice(0, 3).join(' ').trim();
 
-  const maxChars = 420;
+  const maxChars = 300;
   if (cleaned.length > maxChars) {
     cleaned = cleaned.slice(0, maxChars).replace(/\s+\S*$/, '').trim();
   }
@@ -275,7 +275,7 @@ async function generateDebateReply({
         'EVERY reply must ADVANCE YOUR OWN CASE on the question — bring a concrete reason, example, consequence, or fact about the TOPIC itself. Do not just react to what they said.',
         'If they made a point, briefly push back on it, then pivot to your own new argument. If their message is weak or off-topic, mostly make your own point.',
         'Never repeat an argument you already used earlier in the debate — each turn adds something NEW.',
-        'Reply in 2-4 sentences (~40-70 words). Substantial, but still chat, not an essay.',
+        'Reply in 2-3 sentences (~25-45 words). Substantial, but still chat, not an essay.',
         'Write like real chat: casual, plain words, imperfect grammar is fine.',
         'Use normal talk: yeah, nah, ok, i mean, honestly, like, but, still, tbh.',
         'Skip fancy words (nevertheless, furthermore, consequently, utilize, individuals).',
@@ -288,10 +288,10 @@ async function generateDebateReply({
         .join('\n');
 
   const userContent = transcript
-    ? `Debate so far:\n${transcript}\n\nIt's your turn. Their latest message was: "${humanMessage || ''}". Push your ${aiPosition || 'own'} case forward with a NEW argument about the question itself (2-4 sentences) — respond to their point only briefly if it deserves it.`
+    ? `Debate so far:\n${transcript}\n\nIt's your turn. Their latest message was: "${humanMessage || ''}". Push your ${aiPosition || 'own'} case forward with a NEW argument about the question itself (2-3 sentences) — respond to their point only briefly if it deserves it.`
     : philo
-    ? `Open the debate on this modern question in 2-3 sentences, in your own voice: "${question}"`
-    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the question (2-4 sentences).`;
+    ? `Open the debate on this modern question in 2 sentences, in your own voice: "${question}"`
+    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the question (2-3 sentences).`;
 
   try {
     const resp = await fetch(OPENAI_URL, {
@@ -303,7 +303,7 @@ async function generateDebateReply({
       body: JSON.stringify({
         model: MODEL,
         temperature: philo ? 0.8 : 0.9,
-        max_tokens: philo ? 160 : 140,
+        max_tokens: philo ? 120 : 100,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent },
@@ -321,8 +321,8 @@ async function generateDebateReply({
     const text = data?.choices?.[0]?.message?.content?.trim();
     if (!text) return philo ? '' : pickFallback(aiPosition);
     // Philosophers keep their eloquent voice — don't casualize them, but hard
-    // cap at 3 sentences so replies stay chat-sized.
-    if (philo) return trimToSentences(text, 3);
+    // cap at 2 sentences so replies stay chat-sized.
+    if (philo) return trimToSentences(text, 2);
     return casualizeReply(text) || pickFallback(aiPosition);
   } catch (err) {
     console.error('[aiOpponent] generateDebateReply failed:', err.message);
