@@ -66,12 +66,19 @@ async function ensureSeeded(db) {
   await syncCatalog(db);
 }
 
-/** Merge the in-memory catalog into Firestore so new items appear after deploy. */
+/** Merge the in-memory catalog into Firestore so new items appear after deploy,
+ *  and delete items that were removed from the catalog (e.g. retired arenas,
+ *  entrance effects and reaction packs) so clients stop offering them. */
 async function syncCatalog(db) {
   const batch = db.batch();
+  const validIds = new Set(CATALOG.map((i) => i.id));
   for (const item of CATALOG) {
     batch.set(db.collection('shopItems').doc(item.id), item, { merge: true });
   }
+  const existing = await db.collection('shopItems').get();
+  existing.forEach((doc) => {
+    if (!validIds.has(doc.id)) batch.delete(doc.ref);
+  });
   await batch.commit();
 }
 
