@@ -55,6 +55,11 @@ function makeRouter() {
         }
         const item = itemSnap.data();
 
+        // Retired items (removed from catalog) can no longer be purchased.
+        if (itemId === 'badge_owner') {
+          return { ok: false, code: 'item_unavailable' };
+        }
+
         // Expired / time-limited item check.
         if (item.availableUntil && Number(item.availableUntil) < Date.now()) {
           return { ok: false, code: 'item_expired' };

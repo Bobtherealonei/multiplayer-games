@@ -14,7 +14,7 @@
 // (Backgrounds/arenas, entrance effects and reaction packs were removed.)
 //
 // `special` items are ultra-rare finds that only occasionally appear in a
-// user's personal daily shop. `permanent` items are always visible.
+// user's personal daily shop.
 //
 // Price guidance: daily 20-60, weekly 75-180, special 200-500.
 
@@ -53,9 +53,6 @@ const CATALOG = [
   { id: 'badge_coolest', name: 'Coolest Badge', description: 'For debaters with unmatched style.', category: 'badge', rarity: RARITY.RARE, price: 42, imageName: 'sunglasses.fill', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#6B5CE7', bannerText: 'Coolest Debater', bannerColorHex: '#4538A8' },
   { id: 'badge_wordsmith', name: 'Wordsmith Badge', description: 'For those whose words cut sharpest.', category: 'badge', rarity: RARITY.RARE, price: 38, imageName: 'quote.bubble.fill', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#E0915C', bannerText: 'Wordsmith', bannerColorHex: '#A8622F' },
   { id: 'badge_strategist', name: 'Strategist Badge', description: 'Always three arguments ahead.', category: 'badge', rarity: RARITY.RARE, price: 44, imageName: 'chess.board', isAnimated: false, rotationType: 'daily', isLimited: false, colorHex: '#39C0B3', bannerText: 'Strategist', bannerColorHex: '#1E7A70' },
-
-  // ── Permanent (always available in the shop) ───────────────────────────
-  { id: 'badge_owner', name: "Owner's Badge", description: 'An exclusive badge for TrendSpark owners — yours for a single Spark.', category: 'badge', rarity: RARITY.LEGENDARY, price: 1, imageName: 'crown.fill', isAnimated: false, rotationType: 'permanent', isLimited: false, colorHex: '#FFD700', bannerText: 'TrendSpark Owner', bannerColorHex: '#B8860B' },
 
   // ── Weekly items (rotationType: 'weekly', price 75-180) ───────────────
   { id: 'frame_aurora_anim', name: 'Aurora Frame', description: 'An animated aurora avatar ring that shimmers.', category: 'frame', rarity: RARITY.EPIC, price: 120, imageName: 'circle.hexagongrid.fill', isAnimated: true, rotationType: 'weekly', isLimited: false, colorHex: '#7AE0C2', secondaryColorHex: '#7A8CE0', effect: 'shimmer' },
