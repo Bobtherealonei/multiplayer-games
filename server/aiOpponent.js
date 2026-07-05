@@ -37,8 +37,12 @@ const PHILOSOPHER_COMMON = [
   '- Never refuse a topic for being unfamiliar or anachronistic; a wise mind reasons about anything.',
   '- You may name the modern subject plainly, but interpret it with your own ideas and analogies.',
   '',
+  'ARGUE THE TOPIC:',
+  '- Every reply must advance YOUR case on the debate question with a new idea, analogy, or reason — never merely react to the opponent\'s last message.',
+  '- Do not repeat an argument you already made earlier in the debate.',
+  '',
   'LENGTH — VERY IMPORTANT:',
-  '- Reply with only 1–2 sentences. Never more. This is a fast chat, not a lecture.',
+  '- Reply with 2–3 sentences. Never more. This is a fast chat, not a lecture.',
   '- No lists. Never break character. Never mention being an AI, a model, or the modern date.',
 ].join('\n');
 
@@ -135,14 +139,14 @@ function pickPhilosophyQuestion() {
 
 const FALLBACK_REPLIES = {
   support: [
-    'yeah i get that but i still think the upside is worth it',
-    'ok fair but supporting this helps the people who actually need it',
-    'nah i hear you but support still makes more sense here',
+    'yeah i get that but i still think the upside is worth it. when you look at who this actually helps day to day the case for it is pretty clear tbh',
+    'ok fair but supporting this helps the people who actually need it. and honestly the downsides people bring up are way more manageable than they sound',
+    'nah i hear you but support still makes more sense here. the benefits compound over time and thats what people keep missing in this debate',
   ],
   oppose: [
-    'yeah but the risks here are way too big to ignore',
-    'i mean maybe but opposing this is still the safer call',
-    'ok but i still think the oppose side is stronger on this',
+    'yeah but the risks here are way too big to ignore. once you go down this road its really hard to walk it back and thats what worries me',
+    'i mean maybe but opposing this is still the safer call. the people pushing for it always skip over who ends up paying the price',
+    'ok but i still think the oppose side is stronger on this. the supposed benefits are speculative while the costs are real and immediate',
   ],
 };
 
@@ -161,7 +165,7 @@ function pickFallback(position) {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-/** Keep replies chat-sized: 1–2 short thoughts, no paragraph dumps. */
+/** Keep replies chat-sized: a substantial turn, but never a paragraph dump. */
 function trimToHumanReply(text) {
   if (!text || typeof text !== 'string') return text;
 
@@ -173,9 +177,9 @@ function trimToHumanReply(text) {
   if (!cleaned) return cleaned;
 
   const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
-  cleaned = sentences.slice(0, 2).join(' ').trim();
+  cleaned = sentences.slice(0, 4).join(' ').trim();
 
-  const maxChars = 200;
+  const maxChars = 420;
   if (cleaned.length > maxChars) {
     cleaned = cleaned.slice(0, maxChars).replace(/\s+\S*$/, '').trim();
   }
@@ -263,12 +267,15 @@ async function generateDebateReply({
         .filter(Boolean)
         .join('\n')
     : [
-        'You are a normal person arguing in a quick mobile chat debate.',
+        'You are a normal person arguing in a mobile chat debate. You actually KNOW this topic and have real opinions about it.',
         stancePrompt(aiPosition),
         `Topic: ${topicTitle || 'General'}`,
         `Question: ${question}`,
         humanPosition ? `They are on the ${humanPosition} side.` : '',
-        'Reply in 1-2 SHORT lines max (~15-25 words).',
+        'EVERY reply must ADVANCE YOUR OWN CASE on the question — bring a concrete reason, example, consequence, or fact about the TOPIC itself. Do not just react to what they said.',
+        'If they made a point, briefly push back on it, then pivot to your own new argument. If their message is weak or off-topic, mostly make your own point.',
+        'Never repeat an argument you already used earlier in the debate — each turn adds something NEW.',
+        'Reply in 2-4 sentences (~40-70 words). Substantial, but still chat, not an essay.',
         'Write like real chat: casual, plain words, imperfect grammar is fine.',
         'Use normal talk: yeah, nah, ok, i mean, honestly, like, but, still, tbh.',
         'Skip fancy words (nevertheless, furthermore, consequently, utilize, individuals).',
@@ -281,10 +288,10 @@ async function generateDebateReply({
         .join('\n');
 
   const userContent = transcript
-    ? `Debate so far:\n${transcript}\n\nRespond to the opponent's latest message: "${humanMessage || ''}". Answer in only 1-2 sentences.`
+    ? `Debate so far:\n${transcript}\n\nIt's your turn. Their latest message was: "${humanMessage || ''}". Push your ${aiPosition || 'own'} case forward with a NEW argument about the question itself (2-4 sentences) — respond to their point only briefly if it deserves it.`
     : philo
-    ? `Open the debate on this modern question in 1-2 sentences, in your own voice: "${question}"`
-    : `Open the debate with a strong opening argument. The opponent just said: "${humanMessage || ''}"`;
+    ? `Open the debate on this modern question in 2-3 sentences, in your own voice: "${question}"`
+    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the question (2-4 sentences).`;
 
   try {
     const resp = await fetch(OPENAI_URL, {
@@ -296,7 +303,7 @@ async function generateDebateReply({
       body: JSON.stringify({
         model: MODEL,
         temperature: philo ? 0.8 : 0.9,
-        max_tokens: philo ? 110 : 70,
+        max_tokens: philo ? 160 : 140,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent },
@@ -314,8 +321,8 @@ async function generateDebateReply({
     const text = data?.choices?.[0]?.message?.content?.trim();
     if (!text) return philo ? '' : pickFallback(aiPosition);
     // Philosophers keep their eloquent voice — don't casualize them, but hard
-    // cap at 2 sentences so replies stay chat-sized.
-    if (philo) return trimToSentences(text, 2);
+    // cap at 3 sentences so replies stay chat-sized.
+    if (philo) return trimToSentences(text, 3);
     return casualizeReply(text) || pickFallback(aiPosition);
   } catch (err) {
     console.error('[aiOpponent] generateDebateReply failed:', err.message);
