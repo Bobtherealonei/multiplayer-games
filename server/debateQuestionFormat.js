@@ -1,52 +1,78 @@
-// debateQuestionFormat.js — ensure debate prompts use a clear Support/Oppose proposition.
+// debateQuestionFormat.js — ensure debate prompts are clear Support/Oppose propositions.
+//
+// Format: every topic is a declarative STATEMENT, e.g.
+//   "College athletes should be paid a salary."
+// Support = agree with the statement, Oppose = disagree. This normalizer is a
+// safety net that fixes punctuation/quotes and converts legacy "Should X…?"
+// questions (older DB items, old clients) into statement form.
 
-/**
- * Normalize a debate question so Support = "yes" to the proposition and Oppose = "no".
- * Prefer "Should …?" phrasing.
- */
-function ensureShouldQuestion(raw) {
+// Base-form verbs that commonly follow the subject in "Should <subject> <verb>…?"
+// questions. Used to find where the subject ends so we can un-invert the
+// question into "<Subject> should <verb>…".
+const COMMON_VERBS = new Set([
+  'be', 'have', 'get', 'do', 'go', 'stay', 'pay', 'ban', 'send', 'cut',
+  'raise', 'lower', 'exist', 'focus', 'rely', 'give', 'take', 'make',
+  'intervene', 'replace', 'count', 'trust', 'teach', 'matter', 'stop',
+  'require', 'use', 'slow', 'follow', 'change', 'measure', 'start',
+  'forgive', 'allow', 'phase', 'force', 'abolish', 'decriminalize',
+  'regulate', 'break', 'tax', 'fund', 'spend', 'invest', 'protect',
+  'punish', 'reward', 'accept', 'reject', 'support', 'oppose', 'limit',
+  'increase', 'decrease', 'expand', 'reduce', 'keep', 'remove', 'add',
+  'open', 'close', 'tighten', 'loosen', 'legalize', 'criminalize',
+  'prioritize', 'value', 'fear', 'obey', 'pursue', 'return', 'fight',
+  'encourage', 'discourage', 'disclose', 'apply', 'try', 'learn', 'work',
+]);
+
+function questionToStatement(text) {
+  // "Should we/you/… ?" — simple pronoun subjects.
+  const pronoun = text.match(/^should (we|you|people|everyone|society|schools|companies|governments|parents|athletes|students) /i);
+  if (pronoun) {
+    const subject = pronoun[1];
+    const rest = text.slice(pronoun[0].length);
+    return `${subject.charAt(0).toUpperCase()}${subject.slice(1)} should ${rest}`;
+  }
+
+  // General "Should <subject> <verb>…?" — find the first common base-form
+  // verb and un-invert around it.
+  const m = text.match(/^should (.+)$/i);
+  if (m) {
+    const words = m[1].split(' ');
+    for (let i = 1; i < Math.min(words.length, 8); i++) {
+      if (COMMON_VERBS.has(words[i].toLowerCase())) {
+        const subject = words.slice(0, i).join(' ');
+        const rest = words.slice(i).join(' ');
+        return `${subject.charAt(0).toUpperCase()}${subject.slice(1)} should ${rest}`;
+      }
+    }
+  }
+  return text;
+}
+
+function ensureDebateStatement(raw) {
   if (!raw || typeof raw !== 'string') return raw;
   let text = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ');
   if (!text) return text;
-  if (!text.endsWith('?')) text += '?';
 
-  if (/^should /i.test(text)) return text;
-
-  if (/^is the /i.test(text)) {
-    return capitalizeShould(`Should the ${text.slice(7)}`);
-  }
-  if (/^are /i.test(text)) {
-    return capitalizeShould(`Should ${text.slice(4)}`);
-  }
-  if (/^is it (right|fair|justified|wrong) (that |for )?/i.test(text)) {
-    const rest = text.replace(/^is it (right|fair|justified) (that |for )?/i, '');
-    return capitalizeShould(`Should we accept that ${rest.replace(/^./, (c) => c.toLowerCase())}`);
-  }
-  if (/^does /i.test(text)) {
-    const rest = text.slice(5).replace(/\?$/, '');
-    return capitalizeShould(`Should we believe that ${rest}?`);
-  }
-  if (/^will /i.test(text)) {
-    const rest = text.slice(5).replace(/\?$/, '');
-    return capitalizeShould(`Should we expect that ${rest}?`);
-  }
-  if (/^could /i.test(text)) {
-    const rest = text.slice(6).replace(/\?$/, '');
-    return capitalizeShould(`Should we plan for a future where ${rest}?`);
+  if (/^should /i.test(text)) {
+    text = questionToStatement(text.replace(/\?+$/, '').trim());
+  } else if (/^is it (right|fair|okay|acceptable|wrong) /i.test(text)) {
+    text = text.replace(/^is it /i, 'It is ');
   }
 
-  const body = text.replace(/\?$/, '');
-  const lowered = body.charAt(0).toLowerCase() + body.slice(1);
-  return capitalizeShould(`Should ${lowered}?`);
+  // Statements end with a period, never a question mark.
+  text = text.replace(/\?+$/, '').trim();
+  if (!/[.!]$/.test(text)) text += '.';
+
+  // Capitalize first letter.
+  text = text.charAt(0).toUpperCase() + text.slice(1);
+  return text;
 }
 
-function capitalizeShould(text) {
-  return text.replace(/^should /i, 'Should ');
-}
-
-function isShouldQuestion(raw) {
+// True when the text already looks like a statement (no trailing "?").
+function isDebateStatement(raw) {
   if (!raw || typeof raw !== 'string') return false;
-  return /^should /i.test(raw.trim());
+  const t = raw.trim();
+  return t.length > 0 && !t.endsWith('?');
 }
 
-module.exports = { ensureShouldQuestion, isShouldQuestion };
+module.exports = { ensureDebateStatement, isDebateStatement };

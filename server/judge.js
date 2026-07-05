@@ -24,10 +24,10 @@ const MODEL = 'sonar';
 
 function stanceDescription(position) {
   if (position === 'support') {
-    return 'Support side — must argue IN FAVOR of the proposition implied by the debate question (affirmative / "yes" position).';
+    return 'Support side — must argue IN FAVOR of the debate statement (agrees with the proposition).';
   }
   if (position === 'oppose') {
-    return 'Oppose side — must argue AGAINST that proposition (negative / "no" position).';
+    return 'Oppose side — must argue AGAINST the debate statement (disagrees with the proposition).';
   }
   return null;
 }
@@ -221,7 +221,7 @@ async function callSonar(apiKey, topic, question, safeMessages, names, stances) 
 
   const userPrompt =
     `Topic: ${topic}\n` +
-    `Debate Question: ${question}\n` +
+    `Debate Statement: ${question}\n` +
     sideSummary +
     `\nThe two debaters are ${nameX} (their score = ScoreX) and ${nameO} (their score = ScoreO).\n\n` +
     `Transcript:\n${transcript}`;

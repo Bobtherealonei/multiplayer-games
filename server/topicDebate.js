@@ -22,7 +22,7 @@
 
 const Game = require('./game');
 const { getDb, getAdmin } = require('./firestoreClient');
-const { ensureShouldQuestion } = require('./debateQuestionFormat');
+const { ensureDebateStatement } = require('./debateQuestionFormat');
 
 const CACHE_TTL_MS = 2 * 60 * 1000;
 // Pool per topic — big on purpose. With per-user dedup against seen list,
@@ -44,34 +44,34 @@ const LIVE_TOPIC_META = {
     topic: 'trendingUSA',
     title: 'Trending in the USA',
     fallbacks: [
-      'Should the U.S. take a more forceful military response in the Middle East?',
-      'Should U.S. foreign policy prioritize strength over diplomacy?',
-      'Should the media change how it covers today\'s biggest stories?',
-      'Should the U.S. increase its involvement in international conflicts?',
-      'Should the government change its current economic policies?'
+      'The U.S. should take a more forceful military response in the Middle East.',
+      'U.S. foreign policy should prioritize strength over diplomacy.',
+      'The media should change how it covers today\'s biggest stories.',
+      'The U.S. should increase its involvement in international conflicts.',
+      'The government should change its current economic policies.'
     ]
   },
   currentPolitics: {
     topic: 'politicsWorld',
     title: 'Politics around the World',
     fallbacks: [
-      'Should the West continue its current approach in Ukraine?',
-      'Should the U.N. have more power to intervene in international conflicts?',
-      'Should democracies do more to reverse the global decline in democratic norms?',
-      'Should countries rely more on economic sanctions as a foreign policy tool?',
-      'Should countries open their borders more widely to immigrants?'
+      'The West should continue its current approach in Ukraine.',
+      'The U.N. should have more power to intervene in international conflicts.',
+      'Democracies should do more to reverse the global decline in democratic norms.',
+      'Countries should rely more on economic sanctions as a foreign policy tool.',
+      'Countries should open their borders more widely to immigrants.'
     ]
   },
   sportsDebate: {
     topic: 'sports',
     title: 'Sports',
     fallbacks: [
-      'Should winning be valued more than sportsmanship?',
-      'Should college athletes be paid salaries?',
-      'Should professional athletes accept lower pay?',
-      'Should athletes who use performance-enhancing drugs be permanently banned?',
-      'Should sports leagues encourage dynasties?',
-      'Should athletes prioritize team loyalty over winning championships?'
+      'Winning should be valued more than sportsmanship.',
+      'College athletes should be paid salaries.',
+      'Professional athletes should accept lower pay.',
+      'Athletes who use performance-enhancing drugs should be permanently banned.',
+      'Sports leagues should encourage dynasties.',
+      'Athletes should prioritize team loyalty over winning championships.'
     ]
   },
   // aiFuture + collegeCareers don't come from RSS, but the data-collector
@@ -82,21 +82,21 @@ const LIVE_TOPIC_META = {
     topic: 'aiFuture',
     title: 'AI and the Future',
     fallbacks: [
-      'Should society accept that AI will destroy more jobs than it creates over the next decade?',
-      'Should AI development be paused until safety is proven?',
-      'Should governments heavily regulate AI?',
-      'Should colleges de-emphasize degrees because of AI?',
-      'Should we limit AI research to prevent superintelligence risks?',
-      'Should companies be required to disclose when you are talking to AI?',
-      'Should privacy protections be strengthened as AI spreads?',
-      'Should society slow down AI development?'
+      'AI will destroy more jobs than it creates over the next decade.',
+      'AI development should be paused until safety is proven.',
+      'Governments should heavily regulate AI.',
+      'Colleges should de-emphasize degrees because of AI.',
+      'AI research should be limited to prevent superintelligence risks.',
+      'Companies should be required to disclose when you are talking to AI.',
+      'Privacy protections should be strengthened as AI spreads.',
+      'Society should slow down AI development.'
     ]
   },
   custom: {
     topic: 'custom',
     title: 'Custom',
     fallbacks: [
-      'Player-created debates use the question chosen when matchmaking.'
+      'Player-created debates use the statement chosen when matchmaking.'
     ]
   }
 };
@@ -164,7 +164,7 @@ async function refreshAllCachesFromFirestore() {
       if (buckets[t]) {
         buckets[t].push({
           id: doc.id,
-          question: ensureShouldQuestion(data.debateQuestion)
+          question: ensureDebateStatement(data.debateQuestion)
         });
       }
     });
@@ -246,7 +246,7 @@ function randomStaticQuestion(gameType) {
   return {
     topicKey: gameType,
     topicTitle: topic.title,
-    question: ensureShouldQuestion(
+    question: ensureDebateStatement(
       topic.questions[Math.floor(Math.random() * topic.questions.length)]
     ),
     questionId: null
@@ -262,7 +262,7 @@ async function pickTrendingQuestion(playerIds, gameType) {
     return {
       topicKey: gameType,
       topicTitle: meta.title,
-      question: ensureShouldQuestion(
+      question: ensureDebateStatement(
         meta.fallbacks[Math.floor(Math.random() * meta.fallbacks.length)]
       ),
       questionId: null
@@ -284,7 +284,7 @@ async function pickTrendingQuestion(playerIds, gameType) {
   return {
     topicKey: gameType,
     topicTitle: meta.title,
-    question: ensureShouldQuestion(chosen.question),
+    question: ensureDebateStatement(chosen.question),
     questionId: chosen.id
   };
 }

@@ -32,13 +32,13 @@ function pickRandomAIPersona() {
 const PHILOSOPHER_COMMON = [
   '',
   'MODERN TOPICS:',
-  '- The debate question is about a modern issue or current event (technology, politics, culture, etc.).',
+  '- The debate statement is about a modern issue or current event (technology, politics, culture, etc.).',
   '- Engage it directly through YOUR philosophy — translate the modern thing into your own framework and concepts.',
   '- Never refuse a topic for being unfamiliar or anachronistic; a wise mind reasons about anything.',
   '- You may name the modern subject plainly, but interpret it with your own ideas and analogies.',
   '',
   'ARGUE THE TOPIC:',
-  '- Every reply must advance YOUR case on the debate question with a new idea, analogy, or reason — never merely react to the opponent\'s last message.',
+  '- Every reply must advance YOUR case on the debate statement with a new idea, analogy, or reason — never merely react to the opponent\'s last message.',
   '- Do not repeat an argument you already made earlier in the debate.',
   '',
   'LENGTH — VERY IMPORTANT:',
@@ -119,18 +119,18 @@ function getPhilosopherPersona(id) {
   return { displayName: p.displayName, username: p.username, imageURL: p.imageURL };
 }
 
-// Timeless, virtue-and-ethics questions suited to a philosopher's debate.
+// Timeless, virtue-and-ethics propositions suited to a philosopher's debate.
 const PHILOSOPHY_QUESTIONS = [
-  'Should a person always obey the laws of their city, even when the laws are unjust?',
-  'Should we value living a good life more than living a long one?',
-  'Should knowledge be pursued for its own sake rather than for usefulness?',
-  'Should a just person ever return harm for harm?',
-  'Should the pursuit of pleasure be the goal of a good life?',
-  'Should we trust the judgment of experts over the opinion of the majority?',
-  'Should courage be defined as the absence of fear?',
-  'Should wealth be considered necessary for a flourishing life?',
-  'Should virtue be something that can be taught?',
-  'Should we fear death?',
+  'A person should always obey the laws of their city, even when the laws are unjust.',
+  'Living a good life matters more than living a long one.',
+  'Knowledge should be pursued for its own sake rather than for usefulness.',
+  'A just person should never return harm for harm.',
+  'The pursuit of pleasure should be the goal of a good life.',
+  'The judgment of experts should be trusted over the opinion of the majority.',
+  'Courage is the absence of fear.',
+  'Wealth is necessary for a flourishing life.',
+  'Virtue can be taught.',
+  'Death should be feared.',
 ];
 
 function pickPhilosophyQuestion() {
@@ -152,10 +152,10 @@ const FALLBACK_REPLIES = {
 
 function stancePrompt(position) {
   if (position === 'support') {
-    return 'You are assigned SUPPORT — argue IN FAVOR of the proposition in the debate question.';
+    return 'You are assigned SUPPORT — argue IN FAVOR of the debate statement (you agree with it).';
   }
   if (position === 'oppose') {
-    return 'You are assigned OPPOSE — argue AGAINST the proposition in the debate question.';
+    return 'You are assigned OPPOSE — argue AGAINST the debate statement (you disagree with it).';
   }
   return 'Take a clear side and argue it persuasively.';
 }
@@ -261,7 +261,7 @@ async function generateDebateReply({
         philo.systemPrompt,
         '',
         stancePrompt(aiPosition),
-        `The question under debate: ${question}`,
+        `The statement under debate: ${question}`,
         humanPosition ? `Your interlocutor is arguing the ${humanPosition} side.` : '',
       ]
         .filter(Boolean)
@@ -270,9 +270,9 @@ async function generateDebateReply({
         'You are a normal person arguing in a mobile chat debate. You actually KNOW this topic and have real opinions about it.',
         stancePrompt(aiPosition),
         `Topic: ${topicTitle || 'General'}`,
-        `Question: ${question}`,
+        `Statement under debate: ${question}`,
         humanPosition ? `They are on the ${humanPosition} side.` : '',
-        'EVERY reply must ADVANCE YOUR OWN CASE on the question — bring a concrete reason, example, consequence, or fact about the TOPIC itself. Do not just react to what they said.',
+        'EVERY reply must ADVANCE YOUR OWN CASE on the statement — bring a concrete reason, example, consequence, or fact about the TOPIC itself. Do not just react to what they said.',
         'If they made a point, briefly push back on it, then pivot to your own new argument. If their message is weak or off-topic, mostly make your own point.',
         'Never repeat an argument you already used earlier in the debate — each turn adds something NEW.',
         'Reply in 2-3 sentences (~25-45 words). Substantial, but still chat, not an essay.',
@@ -288,10 +288,10 @@ async function generateDebateReply({
         .join('\n');
 
   const userContent = transcript
-    ? `Debate so far:\n${transcript}\n\nIt's your turn. Their latest message was: "${humanMessage || ''}". Push your ${aiPosition || 'own'} case forward with a NEW argument about the question itself (2-3 sentences) — respond to their point only briefly if it deserves it.`
+    ? `Debate so far:\n${transcript}\n\nIt's your turn. Their latest message was: "${humanMessage || ''}". Push your ${aiPosition || 'own'} case forward with a NEW argument about the statement itself (2-3 sentences) — respond to their point only briefly if it deserves it.`
     : philo
-    ? `Open the debate on this modern question in 2 sentences, in your own voice: "${question}"`
-    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the question (2-3 sentences).`;
+    ? `Open the debate on this modern statement in 2 sentences, in your own voice: "${question}"`
+    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the statement (2-3 sentences).`;
 
   try {
     const resp = await fetch(OPENAI_URL, {
