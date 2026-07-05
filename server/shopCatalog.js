@@ -10,8 +10,8 @@
 //   effect (optional: 'shimmer' | 'glow' | 'rainbow' | 'pulse'),
 //   bannerText (optional, badges), bannerColorHex (optional, badge gradient end)
 //
-// Categories: frame, usernameColor, badge, victoryAnimation.
-// (Backgrounds/arenas, entrance effects and reaction packs were removed.)
+// Categories: frame, usernameColor, badge.
+// (Victory celebrations were removed from the shop.)
 //
 // `special` items are ultra-rare finds that only occasionally appear in a
 // user's personal daily shop.
@@ -64,8 +64,6 @@ const CATALOG = [
   { id: 'badge_champion', name: 'Champion Badge', description: 'A rare champion badge for your profile.', category: 'badge', rarity: RARITY.EPIC, price: 95, imageName: 'trophy.fill', isAnimated: false, rotationType: 'weekly', isLimited: false, colorHex: '#C9A962', bannerText: 'Champion', bannerColorHex: '#9A7B3A', effect: 'glow' },
   { id: 'badge_legend', name: 'Legend Badge', description: 'For debaters who never back down.', category: 'badge', rarity: RARITY.LEGENDARY, price: 125, imageName: 'star.circle.fill', isAnimated: false, rotationType: 'weekly', isLimited: false, colorHex: '#FFB347', bannerText: 'Legend', bannerColorHex: '#CC7A1A', effect: 'shimmer' },
   { id: 'badge_gladiator', name: 'Gladiator Badge', description: 'An animated badge forged for the arena of ideas.', category: 'badge', rarity: RARITY.EPIC, price: 110, imageName: 'shield.lefthalf.filled', isAnimated: true, rotationType: 'weekly', isLimited: false, colorHex: '#D95C5C', bannerText: 'Gladiator', bannerColorHex: '#8A2E2E', effect: 'shimmer' },
-  { id: 'victory_confetti', name: 'Confetti Victory', description: 'Celebrate wins with a confetti burst.', category: 'victoryAnimation', rarity: RARITY.EPIC, price: 110, imageName: 'party.popper.fill', isAnimated: true, rotationType: 'weekly', isLimited: false },
-  { id: 'victory_crown', name: 'Crown Victory', description: 'A legendary golden crown victory animation.', category: 'victoryAnimation', rarity: RARITY.LEGENDARY, price: 175, imageName: 'crown.fill', isAnimated: true, rotationType: 'weekly', isLimited: true, colorHex: '#C9A962' },
 
   // ── Special items (rotationType: 'special', price 200-500) ─────────────
   // Ultra-rare finds. Only occasionally appear in a user's personal daily
@@ -74,8 +72,7 @@ const CATALOG = [
   { id: 'frame_eclipse_mythic', name: 'Eclipse Frame', description: 'A mythic ring of molten gold circling the dark.', category: 'frame', rarity: RARITY.MYTHIC, price: 420, imageName: 'circle.circle.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FFD23D', secondaryColorHex: '#1A1A24', effect: 'glow' },
   { id: 'color_aurora_mythic', name: 'Aurora Name', description: 'A mythic name that flows through the colors of the northern lights.', category: 'usernameColor', rarity: RARITY.MYTHIC, price: 380, imageName: 'textformat', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#3DFFB0', secondaryColorHex: '#B06CFF', effect: 'rainbow' },
   { id: 'badge_immortal_mythic', name: 'Immortal Badge', description: 'A mythic badge reserved for the rarest of debaters.', category: 'badge', rarity: RARITY.MYTHIC, price: 500, imageName: 'laurel.leading', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FF5CD0', bannerText: 'Immortal', bannerColorHex: '#7A1A5C', effect: 'rainbow' },
-  { id: 'badge_founder_gold', name: 'Golden Founder Badge', description: 'A legendary badge dipped in pure gold, with a moving sheen.', category: 'badge', rarity: RARITY.LEGENDARY, price: 260, imageName: 'medal.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FFD700', bannerText: 'Golden Founder', bannerColorHex: '#8A6A00', effect: 'shimmer' },
-  { id: 'victory_supernova', name: 'Supernova Victory', description: 'A mythic victory blast that lights up the whole arena.', category: 'victoryAnimation', rarity: RARITY.MYTHIC, price: 400, imageName: 'burst.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FF8C3D', secondaryColorHex: '#FF3D6E', effect: 'glow' }
+  { id: 'badge_founder_gold', name: 'Golden Founder Badge', description: 'A legendary badge dipped in pure gold, with a moving sheen.', category: 'badge', rarity: RARITY.LEGENDARY, price: 260, imageName: 'medal.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FFD700', bannerText: 'Golden Founder', bannerColorHex: '#8A6A00', effect: 'shimmer' }
 ];
 
 module.exports = { CATALOG, RARITY };

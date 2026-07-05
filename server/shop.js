@@ -56,7 +56,7 @@ function makeRouter() {
         const item = itemSnap.data();
 
         // Retired items (removed from catalog) can no longer be purchased.
-        if (itemId === 'badge_owner') {
+        if (itemId === 'badge_owner' || itemId.startsWith('victory_')) {
           return { ok: false, code: 'item_unavailable' };
         }
 
