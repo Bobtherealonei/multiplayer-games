@@ -186,6 +186,17 @@ io.on('connection', async (socket) => {
     }
   });
 
+  // AI debates: the client asks for the AI's reply partway through the AI's
+  // turn in the fixed turn schedule (so the AI "thinks" before answering).
+  socket.on('requestAIReply', async (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    try {
+      await gameManager.handleAIReplyRequest(userId, payload);
+    } catch (err) {
+      console.error('[requestAIReply] failed:', err.message);
+    }
+  });
+
   socket.on('leaveGame', async (data) => {
     const payload = Array.isArray(data) ? data[0] : data;
     const reason = payload?.reason || 'Player has disconnected';

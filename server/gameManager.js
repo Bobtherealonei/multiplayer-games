@@ -418,12 +418,36 @@ class GameManager {
         gameId,
         playerId,
       });
-      return;
     }
+    // AI games: only record the human's message here. The AI answers on its
+    // OWN turn — the client emits `requestAIReply` partway through the AI's
+    // turn (turn-based debate structure), which feels like a real opponent
+    // thinking, instead of an instant reaction to every message.
+  }
 
+  // AI games only: generate one reply from the full chat log so far.
+  // The client calls this partway through the AI's turn in the debate's
+  // fixed turn schedule. Idempotent per turnIndex so re-emits (reconnects,
+  // duplicate timers) can't make the AI speak twice in one turn.
+  async handleAIReplyRequest(playerId, payload) {
+    const gameId = payload?.gameId || (await store.getPlayerGame(playerId));
+    if (!gameId) return;
+    const state = await store.loadGameState(gameId);
+    if (!state) return;
+
+    const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+    const isAIGame = Boolean(state.isAIGame) || otherId === AI_OPPONENT_ID;
+    if (!isAIGame) return;
+
+    const turnIndex = Number.isInteger(payload?.turnIndex) ? payload.turnIndex : null;
+    const repliedTurns = Array.isArray(state.aiRepliedTurns) ? state.aiRepliedTurns : [];
+    if (turnIndex !== null && repliedTurns.includes(turnIndex)) return;
+
+    const chatLog = state.chatLog || [];
     const aiSymbol = state.player1Id === AI_OPPONENT_ID ? state.player1Symbol : state.player2Symbol;
     const aiPosition = state.player1Id === AI_OPPONENT_ID ? state.player1Position : state.player2Position;
     const humanPosition = state.player1Id === playerId ? state.player1Position : state.player2Position;
+    const lastHuman = [...chatLog].reverse().find((entry) => entry.symbol !== aiSymbol);
 
     try {
       const reply = await generateDebateReply({
@@ -432,13 +456,14 @@ class GameManager {
         aiPosition,
         humanPosition,
         chatLog,
-        humanMessage: payload?.message,
+        humanMessage: lastHuman?.text || '',
         philosopher: state.philosopher || null,
       });
       if (!reply) return;
 
       await store.patchGameState(gameId, {
         chatLog: [...chatLog, { symbol: aiSymbol, text: reply }],
+        aiRepliedTurns: turnIndex !== null ? [...repliedTurns, turnIndex] : repliedTurns,
       });
 
       this.io.to(userRoom(playerId)).emit('chatMessage', {
@@ -449,7 +474,7 @@ class GameManager {
         playerId: AI_OPPONENT_ID,
       });
     } catch (err) {
-      console.error('[gameManager] AI chat reply failed:', err.message);
+      console.error('[gameManager] AI turn reply failed:', err.message);
     }
   }
 
