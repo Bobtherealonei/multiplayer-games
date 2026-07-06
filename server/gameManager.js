@@ -245,10 +245,12 @@ class GameManager {
       // timeless one only if the pool is empty.
       let questionText;
       let questionId = null;
+      let questionAmmo = null;
       try {
         const q = await pickNextQuestionForPair([humanId], gameType);
         questionText = q.questionText;
         questionId = q.questionId;
+        questionAmmo = q.ammo || null;
       } catch (err) {
         console.warn('[gameManager] philosopher trending pick failed, using fallback:', err.message);
         questionText = pickPhilosophyQuestion();
@@ -263,6 +265,7 @@ class GameManager {
         topicTitle: philosopherPersona.displayName,
         categoryId: gameType,
         positions,
+        ammo: questionAmmo,
       };
     } else if (gameType === 'custom') {
       if (!options.question) throw new Error('question is required for custom AI debates');
@@ -283,6 +286,7 @@ class GameManager {
         topicTitle: question.topicTitle,
         categoryId: gameType,
         positions,
+        ammo: question.ammo || null,
       };
     }
 
@@ -350,7 +354,10 @@ class GameManager {
     const state = await store.loadGameState(gameId);
     if (!state) return;
 
-    await store.patchGameState(gameId, { question: chosen.question });
+    await store.patchGameState(gameId, {
+      question: chosen.question,
+      debateAmmo: chosen.ammo || null,
+    });
 
     const db = getDb();
     if (db && chosen.questionId) {
@@ -449,6 +456,13 @@ class GameManager {
     const humanPosition = state.player1Id === playerId ? state.player1Position : state.player2Position;
     const lastHuman = [...chatLog].reverse().find((entry) => entry.symbol !== aiSymbol);
 
+    // Prefetched arguments for the AI's assigned side (from the data-collector
+    // via the topic doc). Null-safe: older games / custom debates have none.
+    const sideAmmo =
+      state.debateAmmo && aiPosition && Array.isArray(state.debateAmmo[aiPosition])
+        ? state.debateAmmo[aiPosition]
+        : null;
+
     try {
       const reply = await generateDebateReply({
         question: state.question,
@@ -458,6 +472,7 @@ class GameManager {
         chatLog,
         humanMessage: lastHuman?.text || '',
         philosopher: state.philosopher || null,
+        ammo: sideAmmo,
       });
       if (!reply) return;
 

@@ -98,7 +98,8 @@ async function pickNextQuestionForUser(userId, gameType) {
       questionId,
       questionText: ensureDebateStatement(text),
       categoryId: gameType,
-      topicTitle: meta.title
+      topicTitle: meta.title,
+      ammo: null
     };
   }
 
@@ -124,7 +125,8 @@ async function pickNextQuestionForUser(userId, gameType) {
     questionId: pick.item.id,
     questionText: ensureDebateStatement(pick.item.question),
     categoryId: gameType,
-    topicTitle: meta.title
+    topicTitle: meta.title,
+    ammo: pick.item.ammo || null
   };
 }
 
@@ -163,7 +165,8 @@ async function pickNextQuestionForPair(userIds, gameType) {
       questionId,
       questionText: ensureDebateStatement(text),
       categoryId: gameType,
-      topicTitle: meta.title
+      topicTitle: meta.title,
+      ammo: null
     };
   }
 
@@ -175,7 +178,8 @@ async function pickNextQuestionForPair(userIds, gameType) {
     questionId: pick.id,
     questionText: ensureDebateStatement(pick.question),
     categoryId: gameType,
-    topicTitle: meta.title
+    topicTitle: meta.title,
+    ammo: pick.ammo || null
   };
 }
 

@@ -164,7 +164,10 @@ async function refreshAllCachesFromFirestore() {
       if (buckets[t]) {
         buckets[t].push({
           id: doc.id,
-          question: ensureDebateStatement(data.debateQuestion)
+          question: ensureDebateStatement(data.debateQuestion),
+          // Prefetched per-side arguments from the data-collector (may be null
+          // for template/legacy items). Used by the AI opponent.
+          ammo: data.debateAmmo || null
         });
       }
     });
@@ -265,7 +268,8 @@ async function pickTrendingQuestion(playerIds, gameType) {
       question: ensureDebateStatement(
         meta.fallbacks[Math.floor(Math.random() * meta.fallbacks.length)]
       ),
-      questionId: null
+      questionId: null,
+      ammo: null
     };
   }
 
@@ -285,7 +289,8 @@ async function pickTrendingQuestion(playerIds, gameType) {
     topicKey: gameType,
     topicTitle: meta.title,
     question: ensureDebateStatement(chosen.question),
-    questionId: chosen.id
+    questionId: chosen.id,
+    ammo: chosen.ammo || null
   };
 }
 
@@ -307,6 +312,7 @@ class TopicDebate extends Game {
     this.topicTitle = TRENDING_USA_TITLE;
     this.question = 'Finding a fresh debate topic...';
     this.questionId = null;
+    this.debateAmmo = null;
     this.matchRequests = { P1: null, P2: null };
     this.winner = null;
     this.isDraw = false;
@@ -345,6 +351,7 @@ class TopicDebate extends Game {
       this.topicTitle = this.preChosenMatch.topicTitle || meta.title;
       this.question = this.preChosenMatch.question;
       this.questionId = this.preChosenMatch.questionId || null;
+      this.debateAmmo = this.preChosenMatch.ammo || null;
       const positions = this.preChosenMatch.positions || {};
       this.player1Position = positions[this.player1Id] || 'support';
       this.player2Position = positions[this.player2Id] || 'oppose';
@@ -459,6 +466,7 @@ class TopicDebate extends Game {
       topicTitle: this.topicTitle,
       question: this.question,
       questionId: this.questionId,
+      debateAmmo: this.debateAmmo,
       matchRequests: this.matchRequests,
       winner: this.winner,
       isDraw: this.isDraw,
@@ -485,6 +493,7 @@ class TopicDebate extends Game {
     this.topicTitle = state.topicTitle ?? TRENDING_USA_TITLE;
     this.question = state.question ?? 'Finding a fresh debate topic...';
     this.questionId = state.questionId ?? null;
+    this.debateAmmo = state.debateAmmo ?? null;
     this.matchRequests = state.matchRequests ?? { P1: null, P2: null };
     this.winner = state.winner ?? null;
     this.isDraw = state.isDraw ?? false;
