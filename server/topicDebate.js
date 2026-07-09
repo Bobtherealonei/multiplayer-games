@@ -1,12 +1,12 @@
-// topicDebate.js — debate game backed by live-news questions for the
-// "live" topics (Trending in the USA, Politics around the World, Sports) and
-// a static rotation for the rest (AI, College & Careers).
+// topicDebate.js — debate game backed by live-news questions for all four
+// in-app categories (Trending in the USA, Politics around the World, Sports,
+// AI and the Future). Custom debates use player-written statements.
 //
 // Pipeline split:
 //   data-collector -> writes/retires items in Firestore `newsItems`, tagging
 //                     each item with a `topic` (trendingUSA | politicsWorld |
-//                     sports). Legacy docs without `topic` default to
-//                     trendingUSA on read.
+//                     sports | aiFuture). Legacy docs without `topic` default
+//                     to trendingUSA on read.
 //   this file      -> reads live items, filters out questions either player
 //                     has already debated, records seen questions per user.
 //
@@ -74,10 +74,8 @@ const LIVE_TOPIC_META = {
       'Athletes should prioritize team loyalty over winning championships.'
     ]
   },
-  // aiFuture + collegeCareers don't come from RSS, but the data-collector
-  // generates a rolling batch of OpenAI-written questions for them and
-  // writes them into `newsItems` with the topic tag. They get the same
-  // pool-from-Firestore + per-user dedup treatment as the RSS topics.
+  // aiFuture pulls from the same RSS → Firestore pipeline as the other live
+  // categories (MIT Tech Review, NYT Technology, Ars Technica, Wired).
   aiFuture: {
     topic: 'aiFuture',
     title: 'AI and the Future',
@@ -155,6 +153,7 @@ async function refreshAllCachesFromFirestore() {
       let t = data.topic;
       if (!t) {
         if (data.category === 'sports') t = 'sports';
+        else if (data.category === 'tech') t = 'aiFuture';
         else if (data.category === 'politics' || data.category === 'intl' || data.category === 'war') {
           t = 'politicsWorld';
         } else {

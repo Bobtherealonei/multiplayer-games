@@ -1,12 +1,23 @@
-// judge.js — Express route that has Perplexity Sonar judge a finished debate.
+// judge.js — Express route that judges a finished debate with a hybrid
+// two-engine strategy:
 //
-// iOS POSTs the full transcript with player labels (X / O); we ask Sonar to
-// evaluate argument quality + factual accuracy and return:
-//   { winner: "X"|"O"|"tie", scoreX: 0-10, scoreO: 0-10, review: "...", sources: [] }
+//   'walkover' — no API call at all. A player who never sent a substantive
+//                message loses to one who did; two silent players tie.
+//   'standard' — gpt-4o-mini scores argument quality from the transcript
+//                alone (~$0.001/debate). Used for pure-opinion debates.
+//   'verified' — Perplexity Sonar scores WITH live web search
+//                (~$0.006-0.01/debate). Used when the transcript contains
+//                factual / current-events claims worth checking.
+//
+// Which engine runs is decided by judgePolicy.decideJudgeMode() from the
+// game's category, philosopher flag, pre-verified ammo, and a factual-claim
+// scan of the transcript. Either engine returns the same shape:
+//   { winner: "X"|"O"|"tie", scoreX: 0-10, scoreO: 0-10, review: "...",
+//     sources: [], judgeMode: "walkover"|"standard"|"verified" }
 //
 // Cross-instance single-flight (Redis):
 //   Both players hit /judge ~simultaneously. Without coordination, two
-//   instances would each call Perplexity (double cost) and produce two
+//   instances would each call the API (double cost) and produce two
 //   different reviews (bad UX — the players see different verdicts).
 //   The pattern below uses a Redis lock + result key:
 //     1. GET judge:{gameId}        — cached? return it.
@@ -18,9 +29,21 @@
 
 const express = require('express');
 const store = require('./gameStore');
+const {
+  isSubstantiveText,
+  participationBySymbol,
+  decideJudgeMode,
+  wantsRecencyFilter,
+} = require('./judgePolicy');
 
 const PERPLEXITY_URL = 'https://api.perplexity.ai/chat/completions';
-const MODEL = 'sonar';
+const PERPLEXITY_MODEL = 'sonar';
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_MODEL = 'gpt-4o-mini';
+
+// Scores + a 2-4 sentence review fit comfortably in 300 tokens; the old 500
+// cap just paid for prose nobody reads.
+const JUDGE_MAX_TOKENS = 300;
 
 function stanceDescription(position) {
   if (position === 'support') {
@@ -67,10 +90,22 @@ No Support/Oppose assignments were recorded for this debate. Score each player o
   return lines.join('\n');
 }
 
-function buildSystemPrompt(todayHuman, nameX, nameO, stances) {
+// hasWeb toggles the fact-checking framing: the Sonar prompt tells the model
+// to verify claims against live sources; the mini prompt tells it to judge
+// reasoning and only penalize claims that are false per common knowledge —
+// never to guess about very recent events it can't check.
+function buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb) {
   const sideBlock = buildSideInstructions(nameX, nameO, stances);
 
-  return `You are an impartial AI debate judge. Two players just had a short debate: ${nameX} and ${nameO}. Today is ${todayHuman}. You have access to the live web — use it to spot-check any factual claims.
+  const factLine = hasWeb
+    ? 'You have access to the live web — use it to spot-check any factual claims.'
+    : 'You do NOT have web access. Judge argument quality, clarity, relevance, and reasoning. Penalize claims that are clearly false by well-established common knowledge, but do NOT guess about very recent events you cannot verify — score those on reasoning alone.';
+
+  const falseClaimCap = hasWeb
+    ? '- Made significant factually false claims that current web sources contradict.'
+    : '- Made significant claims that are clearly false by well-established common knowledge.';
+
+  return `You are an impartial AI debate judge. Two players just had a short debate: ${nameX} and ${nameO}. Today is ${todayHuman}. ${factLine}
 ${sideBlock}
 
 In your scoring output:
@@ -99,7 +134,7 @@ ANY of these caps a player at 2 OR LOWER, regardless of length:
 - Insults, profanity, slurs, or hate speech with no actual argument.
 - Personal attacks instead of addressing the question.
 - Pure trolling / off-topic spam.
-- Made significant factually false claims that current web sources contradict.
+${falseClaimCap}
 
 DO NOT
 - Do not adjust scores so they come out equal or unequal — score each player on their own merits, ignoring what the other got.
@@ -167,15 +202,12 @@ function sanitizeStance(raw) {
   return raw;
 }
 
-async function resolvePlayerStances(gameId, clientStances) {
+function resolvePlayerStances(state, clientStances) {
   const stances = { X: null, O: null };
 
-  if (typeof gameId === 'string' && gameId.length > 0) {
-    const state = await store.loadGameState(gameId);
-    if (state) {
-      stances.X = sanitizeStance(state.player1Position);
-      stances.O = sanitizeStance(state.player2Position);
-    }
+  if (state) {
+    stances.X = sanitizeStance(state.player1Position);
+    stances.O = sanitizeStance(state.player2Position);
   }
 
   if (clientStances && typeof clientStances === 'object') {
@@ -186,7 +218,9 @@ async function resolvePlayerStances(gameId, clientStances) {
   return stances;
 }
 
-async function callSonar(apiKey, topic, question, safeMessages, names, stances) {
+// ── Shared prompt assembly ─────────────────────────────────────────────────
+
+function buildPrompts(topic, question, safeMessages, names, stances, hasWeb) {
   const nameX = names.X;
   const nameO = names.O;
 
@@ -226,22 +260,39 @@ async function callSonar(apiKey, topic, question, safeMessages, names, stances) 
     `\nThe two debaters are ${nameX} (their score = ScoreX) and ${nameO} (their score = ScoreO).\n\n` +
     `Transcript:\n${transcript}`;
 
+  return {
+    system: buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb),
+    user: userPrompt,
+  };
+}
+
+// ── Engines ────────────────────────────────────────────────────────────────
+
+// Verified path: Perplexity Sonar with live web search. Tightened vs the old
+// config: low search context (smallest per-request search fee tier), capped
+// output, and the recency filter only when the debate is news-backed.
+async function callSonar(apiKey, topic, question, safeMessages, names, stances, { recency } = {}) {
+  const { system, user } = buildPrompts(topic, question, safeMessages, names, stances, true);
+
+  const body = {
+    model: PERPLEXITY_MODEL,
+    temperature: 0.2,
+    max_tokens: JUDGE_MAX_TOKENS,
+    web_search_options: { search_context_size: 'low' },
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+  };
+  if (recency) body.search_recency_filter = 'month';
+
   const upstream = await fetch(PERPLEXITY_URL, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: MODEL,
-      temperature: 0.2,
-      max_tokens: 500,
-      search_recency_filter: 'month',
-      messages: [
-        { role: 'system', content: buildSystemPrompt(todayHuman, nameX, nameO, stances) },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!upstream.ok) {
@@ -256,18 +307,129 @@ async function callSonar(apiKey, topic, question, safeMessages, names, stances) 
   const sources = Array.isArray(data?.citations) ? data.citations : [];
 
   const parsed = parseJudgeReply(content);
-  return { ...parsed, sources };
+  return { ...parsed, sources, judgeMode: 'verified' };
+}
+
+// Standard path: gpt-4o-mini, transcript only, no web. Same scoring rules and
+// output format, ~1/10th of the verified cost.
+async function callMiniJudge(apiKey, topic, question, safeMessages, names, stances) {
+  const { system, user } = buildPrompts(topic, question, safeMessages, names, stances, false);
+
+  const upstream = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0.2,
+      max_tokens: JUDGE_MAX_TOKENS,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text().catch(() => '');
+    const err = new Error(`OpenAI ${upstream.status}: ${errText}`);
+    err.status = upstream.status;
+    throw err;
+  }
+
+  const data = await upstream.json();
+  const content = data?.choices?.[0]?.message?.content || '';
+
+  const parsed = parseJudgeReply(content);
+  return { ...parsed, sources: [], judgeMode: 'standard' };
+}
+
+// ── Walkover (no-API) results ──────────────────────────────────────────────
+// One player never sent a substantive message -> the other wins by default.
+// Both silent -> tie. The participant's score scales gently with how much
+// they actually contributed (5 base + 1 per message, capped at 8) so a
+// default win never outranks a genuinely strong judged performance.
+function walkoverResult(participation, names) {
+  const { X, O } = participation;
+
+  if (X === 0 && O === 0) {
+    return {
+      winner: 'tie',
+      scoreX: 0,
+      scoreO: 0,
+      review: 'Neither player sent any arguments, so there is nothing to judge.',
+      sources: [],
+      judgeMode: 'walkover',
+    };
+  }
+
+  const participantScore = (count) => Math.min(8, 5 + Math.max(0, count - 1));
+
+  if (X === 0) {
+    return {
+      winner: 'O',
+      scoreX: 0,
+      scoreO: participantScore(O),
+      review: `${names.X} never sent an argument, so ${names.O} wins this debate by default for showing up and making their case.`,
+      sources: [],
+      judgeMode: 'walkover',
+    };
+  }
+
+  return {
+    winner: 'X',
+    scoreX: participantScore(X),
+    scoreO: 0,
+    review: `${names.O} never sent an argument, so ${names.X} wins this debate by default for showing up and making their case.`,
+    sources: [],
+    judgeMode: 'walkover',
+  };
+}
+
+// ── Engine runner with cross-engine fallback ───────────────────────────────
+// If the chosen engine's key is missing or its call fails, fall back to the
+// other one rather than erroring the whole debate. A judged result from the
+// "wrong" engine beats a 502 every time.
+async function runJudge({ mode, recency, topic, question, safeMessages, names, stances }) {
+  const pplxKey = process.env.PERPLEXITY_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+
+  const sonar = () => callSonar(pplxKey, topic, question, safeMessages, names, stances, { recency });
+  const mini = () => callMiniJudge(openaiKey, topic, question, safeMessages, names, stances);
+
+  const attempts = [];
+  if (mode === 'verified') {
+    if (pplxKey) attempts.push(sonar);
+    if (openaiKey) attempts.push(mini);
+  } else {
+    if (openaiKey) attempts.push(mini);
+    if (pplxKey) attempts.push(sonar);
+  }
+
+  if (attempts.length === 0) {
+    const err = new Error('No judge API keys configured (need PERPLEXITY_API_KEY and/or OPENAI_API_KEY)');
+    err.status = 500;
+    throw err;
+  }
+
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      return await attempt();
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[judge] engine attempt failed (${err.message.slice(0, 120)}) — ${attempts.indexOf(attempt) < attempts.length - 1 ? 'falling back' : 'no fallback left'}`);
+    }
+  }
+  throw lastErr;
 }
 
 function makeRouter() {
   const router = express.Router();
 
   router.post('/judge', async (req, res) => {
-    const apiKey = process.env.PERPLEXITY_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Server misconfigured: PERPLEXITY_API_KEY not set' });
-    }
-
     const {
       topic = '',
       question = '',
@@ -285,28 +447,47 @@ function makeRouter() {
       O: sanitizeName(rawNames && rawNames.O, 'Player 2'),
     };
 
-    const stances = await resolvePlayerStances(gameId, rawStances);
+    // Load game state ONCE — stances, category, philosopher flag, and ammo
+    // info all come from it.
+    const hasGameId = typeof gameId === 'string' && gameId.length > 0;
+    const state = hasGameId ? await store.loadGameState(gameId) : null;
+    const stances = resolvePlayerStances(state, rawStances);
 
     const MAX_MESSAGES = 80;
     const safeMessages = messages
       .filter((m) => m && typeof m.text === 'string' && m.text.trim().length > 0)
       .slice(-MAX_MESSAGES);
 
-    if (safeMessages.length === 0) {
-      return res.json({
-        winner: 'tie',
-        scoreX: 0,
-        scoreO: 0,
-        review: 'No messages were exchanged, so there is nothing to judge.',
-        sources: [],
-      });
+    // Walkover rule: silent player loses, both silent ties. Reactions like
+    // "[rxn:flame.fill]" don't count as participation.
+    const participation = participationBySymbol(safeMessages);
+    if (participation.X === 0 || participation.O === 0) {
+      const result = walkoverResult(participation, names);
+      if (hasGameId) {
+        await store.setJudgeResult(gameId, result).catch(() => {});
+      }
+      return res.json(result);
     }
+
+    const decision = decideJudgeMode({ state, messages: safeMessages });
+    const recency = wantsRecencyFilter(state);
+    console.log(`[judge] gameId=${gameId || 'none'} mode=${decision.mode} reason=${decision.reason} recency=${recency}`);
+
+    const judgeArgs = {
+      mode: decision.mode,
+      recency,
+      topic,
+      question,
+      safeMessages,
+      names,
+      stances,
+    };
 
     // No gameId? Fall back to per-call execution (no de-duplication
     // possible). This branch is mostly for safety — iOS always sends one.
-    if (typeof gameId !== 'string' || gameId.length === 0) {
+    if (!hasGameId) {
       try {
-        const result = await callSonar(apiKey, topic, question, safeMessages, names, stances);
+        const result = await runJudge(judgeArgs);
         return res.json(result);
       } catch (err) {
         const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
@@ -323,7 +504,7 @@ function makeRouter() {
     const gotLock = await store.tryAcquireJudgeLock(gameId);
     if (gotLock) {
       try {
-        const result = await callSonar(apiKey, topic, question, safeMessages, names, stances);
+        const result = await runJudge(judgeArgs);
         await store.setJudgeResult(gameId, result);
         return res.json(result);
       } catch (err) {
