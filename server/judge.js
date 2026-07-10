@@ -29,7 +29,9 @@
 
 const express = require('express');
 const store = require('./gameStore');
+const { getDb } = require('./firestoreClient');
 const {
+  AI_OPPONENT_ID,
   isSubstantiveText,
   participationBySymbol,
   decideJudgeMode,
@@ -200,6 +202,63 @@ function sanitizeName(raw, fallback) {
 function sanitizeStance(raw) {
   if (raw !== 'support' && raw !== 'oppose') return null;
   return raw;
+}
+
+// ── Player name resolution ─────────────────────────────────────────────────
+// The judge review should refer to players by their username, never
+// "Player 1"/"Player 2". The server resolves names itself from game state +
+// Firestore so both clients always see identical labels (the cached verdict
+// is shared), instead of trusting whatever one client happened to send.
+
+async function lookupHumanUsername(db, uid) {
+  if (!uid) return null;
+  try {
+    const snap = await db.collection('publicProfiles').doc(uid).get();
+    const data = snap.data() || {};
+    const username = typeof data.username === 'string' ? data.username.trim() : '';
+    if (username) return username;
+    const name = typeof data.name === 'string' ? data.name.trim() : '';
+    if (name) return name;
+  } catch (err) {
+    console.warn(`[judge] username lookup failed for ${uid}: ${err.message}`);
+  }
+  return null;
+}
+
+function aiOpponentName(state) {
+  const persona = state?.aiPersona;
+  if (persona && typeof persona.displayName === 'string' && persona.displayName.trim()) {
+    return persona.displayName.trim();
+  }
+  return 'The AI';
+}
+
+// Symbol mapping matches the clients' canonicalization: P1 -> X, P2 -> O.
+async function resolvePlayerNames(state, rawNames) {
+  const names = {
+    X: sanitizeName(rawNames && rawNames.X, ''),
+    O: sanitizeName(rawNames && rawNames.O, ''),
+  };
+
+  if (state) {
+    const db = getDb();
+    const resolve = async (uid) => {
+      if (uid === AI_OPPONENT_ID) return aiOpponentName(state);
+      return db ? lookupHumanUsername(db, uid) : null;
+    };
+    const [nameX, nameO] = await Promise.all([
+      resolve(state.player1Id),
+      resolve(state.player2Id),
+    ]);
+    // Server lookup wins over client-sent names — it's the only source both
+    // clients are guaranteed to agree on.
+    if (nameX) names.X = sanitizeName(nameX, names.X);
+    if (nameO) names.O = sanitizeName(nameO, names.O);
+  }
+
+  if (!names.X) names.X = 'Player 1';
+  if (!names.O) names.O = 'Player 2';
+  return names;
 }
 
 function resolvePlayerStances(state, clientStances) {
@@ -442,16 +501,12 @@ function makeRouter() {
       return res.status(400).json({ error: 'messages must be an array' });
     }
 
-    const names = {
-      X: sanitizeName(rawNames && rawNames.X, 'Player 1'),
-      O: sanitizeName(rawNames && rawNames.O, 'Player 2'),
-    };
-
-    // Load game state ONCE — stances, category, philosopher flag, and ammo
-    // info all come from it.
+    // Load game state ONCE — stances, category, philosopher flag, ammo, and
+    // player identities all come from it.
     const hasGameId = typeof gameId === 'string' && gameId.length > 0;
     const state = hasGameId ? await store.loadGameState(gameId) : null;
     const stances = resolvePlayerStances(state, rawStances);
+    const names = await resolvePlayerNames(state, rawNames);
 
     const MAX_MESSAGES = 80;
     const safeMessages = messages
