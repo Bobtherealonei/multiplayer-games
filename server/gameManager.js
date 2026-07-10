@@ -463,6 +463,10 @@ class GameManager {
         ? state.debateAmmo[aiPosition]
         : null;
 
+    console.log(
+      `[aiOpponent] gameId=${gameId} turn=${turnIndex ?? '?'} side=${aiPosition || '?'} ammoPts=${sideAmmo?.length ?? 0} questionId=${state.questionId || 'none'}`
+    );
+
     try {
       const reply = await generateDebateReply({
         question: state.question,

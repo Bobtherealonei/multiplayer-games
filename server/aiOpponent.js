@@ -260,14 +260,15 @@ async function generateDebateReply({
   // Prefetched arguments for the AI's side, generated alongside the topic
   // from the source news story. Paraphrase-one-per-turn keeps it sounding
   // human instead of like a briefing doc.
-  const ammoBlock =
-    Array.isArray(ammo) && ammo.length
-      ? [
-          'Material for your side (from the news story behind this topic):',
-          ...ammo.map((p) => `- ${p}`),
-          'Use AT MOST ONE of these per reply, reworded in your own voice — never quote them, never list them, and skip them entirely when you have a better point of your own.',
-        ].join('\n')
-      : '';
+  const hasAmmo = Array.isArray(ammo) && ammo.length > 0;
+  const ammoBlock = hasAmmo
+    ? [
+        'FACTS for your side (from the news story behind this topic — you MUST use these):',
+        ...ammo.map((p) => `- ${p}`),
+        'REQUIRED: each reply must weave in ONE concrete fact from the list above (a number, name, program, or specific claim). Rephrase it in casual chat voice — never quote verbatim, never list bullets — but the fact must be recognizable.',
+        'Pick a different unused fact each turn when possible; do not repeat the same fact twice in one debate.',
+      ].join('\n')
+    : '';
 
   const system = philo
     ? [
@@ -287,7 +288,9 @@ async function generateDebateReply({
         `Statement under debate: ${question}`,
         humanPosition ? `They are on the ${humanPosition} side.` : '',
         ammoBlock,
-        'EVERY reply must ADVANCE YOUR OWN CASE on the statement — bring a concrete reason, example, consequence, or fact about the TOPIC itself. Do not just react to what they said.',
+        hasAmmo
+          ? 'EVERY reply must ADVANCE YOUR CASE with one of the facts above plus a brief reaction to them if needed.'
+          : 'EVERY reply must ADVANCE YOUR OWN CASE on the statement — bring a concrete reason, example, consequence, or fact about the TOPIC itself. Do not just react to what they said.',
         'If they made a point, briefly push back on it, then pivot to your own new argument. If their message is weak or off-topic, mostly make your own point.',
         'Never repeat an argument you already used earlier in the debate — each turn adds something NEW.',
         'Reply in 2-3 sentences (~25-45 words). Substantial, but still chat, not an essay.',

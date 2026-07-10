@@ -60,7 +60,8 @@ class DebateLobbyManager {
       questionId: question.questionId,
       topicTitle: question.topicTitle,
       categoryId: gameType,
-      positions: selections
+      positions: selections,
+      ammo: question.ammo || null,
     };
 
     const gameId = await this.gameManager.createGame(
@@ -194,7 +195,8 @@ class DebateLobbyManager {
       questionId: lobbyData.questionId,
       topicTitle: lobbyData.topicTitle,
       categoryId: gameType,
-      positions: selections
+      positions: selections,
+      ammo: lobbyData.debateAmmo || null,
     };
 
     await Promise.all([
