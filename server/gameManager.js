@@ -334,6 +334,45 @@ class GameManager {
     console.log(`[gameManager] debate doc written gameId=${gameId} questionId=${matchPayload.questionId}`);
   }
 
+  // Snapshots the full chat transcript into Firestore so admins can review
+  // debate conversations after the fact — Redis state (including chatLog)
+  // is deleted a moment later in endGame(). Upserts `debates/{gameId}` so
+  // this works whether or not `_writeDebateDocument` already created it.
+  async _persistDebateTranscript(gameId, state) {
+    const db = getDb();
+    if (!db || !state) return;
+    try {
+      const admin = getAdmin();
+      const FieldValue = admin.firestore.FieldValue;
+      const chatLog = Array.isArray(state.chatLog) ? state.chatLog : [];
+      await db.collection('debates').doc(gameId).set(
+        {
+          gameId,
+          gameType: state.gameType || null,
+          categoryId: state.gameType || null,
+          topicTitle: state.topicTitle || null,
+          questionId: state.questionId || null,
+          questionText: state.question || '',
+          player1Id: state.player1Id || null,
+          player2Id: state.player2Id || null,
+          player1Symbol: state.player1Symbol || 'P1',
+          player2Symbol: state.player2Symbol || 'P2',
+          player1Position: state.player1Position || null,
+          player2Position: state.player2Position || null,
+          isAIGame: Boolean(state.isAIGame),
+          aiPersona: state.aiPersona || null,
+          messages: chatLog.map((m) => ({ symbol: m?.symbol || null, text: m?.text || '' })),
+          messageCount: chatLog.length,
+          status: 'ended',
+          endedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      console.error(`[gameManager] failed to persist debate transcript for ${gameId}:`, err.message);
+    }
+  }
+
   async _resolveTrendingQuestion(gameId, gameType, player1Id, player2Id) {
     let chosen;
     try {
@@ -522,6 +561,8 @@ class GameManager {
     const state = await store.loadGameState(gameId);
     if (!state) return;
     const { player1Id, player2Id } = state;
+
+    await this._persistDebateTranscript(gameId, state);
 
     for (const uid of [player1Id, player2Id]) {
       const t = this.pendingDisconnects.get(uid);

@@ -19,7 +19,6 @@ const GameManager = require('./gameManager');
 const Matchmaking = require('./matchmaking');
 const DebateLobbyManager = require('./debateLobby');
 const store = require('./gameStore');
-const factCheckRoute = require('./factcheck');
 const coachRoute = require('./coach');
 const judgeRoute = require('./judge');
 const nextQuestionRoute = require('./nextQuestion');
@@ -30,7 +29,7 @@ const leaderboardRoute = require('./leaderboard');
 
 const app = express();
 
-// HTTP middleware (used by /factcheck, /coach, /judge — Socket.IO has its
+// HTTP middleware (used by /coach, /judge — Socket.IO has its
 // own CORS).
 app.use(cors());
 app.use(express.json({ limit: '256kb' }));
@@ -76,7 +75,6 @@ app.get('/', (req, res) => {
 });
 
 // LLM proxy routes (keys live only in Render env vars).
-app.use(factCheckRoute.makeRouter());
 app.use(coachRoute.makeRouter());
 app.use(judgeRoute.makeRouter());
 app.use(nextQuestionRoute.makeRouter());
