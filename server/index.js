@@ -132,13 +132,46 @@ io.on('connection', async (socket) => {
     }
   });
 
+  // AI debates: pick the question BEFORE the game exists so the client can
+  // show it on the Support/Oppose selection screen. The pick is stashed on
+  // this socket and reused by the matchWithAI that follows, so the player
+  // debates exactly the question they saw.
+  socket.on('previewAIQuestion', async (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    const gameType = payload?.gameType || 'religion';
+    const philosopher = payload?.philosopher || null;
+    try {
+      await store.touchPlayerOnline(userId);
+      const preview = await gameManager.previewAIQuestion(userId, gameType, philosopher);
+      socket.data.aiQuestionPreview = { gameType, philosopher, ...preview };
+      socket.emit('aiQuestionPreview', {
+        gameType,
+        question: preview.question,
+        topicTitle: preview.topicTitle,
+      });
+    } catch (err) {
+      console.error('[previewAIQuestion] failed:', err.message);
+      socket.data.aiQuestionPreview = null;
+      socket.emit('aiQuestionPreview', { gameType, question: null });
+    }
+  });
+
   socket.on('matchWithAI', async (data) => {
     const payload = Array.isArray(data) ? data[0] : data;
     const gameType = payload?.gameType || 'religion';
+    // Server-side stash only — never trust a preview sent in the payload.
+    const stored = socket.data.aiQuestionPreview || null;
+    const preview =
+      stored &&
+      stored.gameType === gameType &&
+      (stored.philosopher || null) === (payload?.philosopher || null)
+        ? stored
+        : null;
+    socket.data.aiQuestionPreview = null;
     try {
       await store.touchPlayerOnline(userId);
       await matchmaking.removePlayer(userId);
-      await gameManager.createAIGame(userId, gameType, payload || {});
+      await gameManager.createAIGame(userId, gameType, { ...(payload || {}), preview });
       socket.emit('matchmakingStatus', { status: 'aiMatched', gameType });
     } catch (err) {
       console.error('[matchWithAI] failed:', err.message);

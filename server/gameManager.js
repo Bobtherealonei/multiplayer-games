@@ -224,6 +224,27 @@ class GameManager {
     return gameId;
   }
 
+  // Pick the debate question for an upcoming AI game ahead of creation so the
+  // Support/Oppose selection screen can show it. The caller stashes the result
+  // and passes it back via options.preview so the game uses this exact pick.
+  async previewAIQuestion(humanId, gameType, philosopher = null) {
+    try {
+      const q = await pickNextQuestionForPair([humanId], gameType);
+      return {
+        question: q.questionText,
+        questionId: q.questionId || null,
+        topicTitle: q.topicTitle || null,
+        ammo: q.ammo || null,
+      };
+    } catch (err) {
+      if (philosopher && getPhilosopherPersona(philosopher)) {
+        console.warn('[gameManager] philosopher preview pick failed, using fallback:', err.message);
+        return { question: pickPhilosophyQuestion(), questionId: null, topicTitle: null, ammo: null };
+      }
+      throw err;
+    }
+  }
+
   async createAIGame(humanId, gameType, options = {}) {
     if (!humanId) throw new Error('humanId is required');
     if (await this.isPlayerInGame(humanId)) {
@@ -247,6 +268,10 @@ class GameManager {
     const philosopher = options.philosopher || null;
     const philosopherPersona = philosopher ? getPhilosopherPersona(philosopher) : null;
 
+    // Question previously shown on the side-selection screen (stashed by the
+    // socket layer) — reuse it so the player debates exactly what they saw.
+    const preview = options.preview && options.preview.question ? options.preview : null;
+
     if (philosopher && philosopherPersona) {
       // Philosopher debates argue MODERN topics / current events, but in the
       // philosopher's own voice. Pull a live trending question; fall back to a
@@ -254,14 +279,20 @@ class GameManager {
       let questionText;
       let questionId = null;
       let questionAmmo = null;
-      try {
-        const q = await pickNextQuestionForPair([humanId], gameType);
-        questionText = q.questionText;
-        questionId = q.questionId;
-        questionAmmo = q.ammo || null;
-      } catch (err) {
-        console.warn('[gameManager] philosopher trending pick failed, using fallback:', err.message);
-        questionText = pickPhilosophyQuestion();
+      if (preview) {
+        questionText = preview.question;
+        questionId = preview.questionId || null;
+        questionAmmo = preview.ammo || null;
+      } else {
+        try {
+          const q = await pickNextQuestionForPair([humanId], gameType);
+          questionText = q.questionText;
+          questionId = q.questionId;
+          questionAmmo = q.ammo || null;
+        } catch (err) {
+          console.warn('[gameManager] philosopher trending pick failed, using fallback:', err.message);
+          questionText = pickPhilosophyQuestion();
+        }
       }
       matchPayload = {
         question: questionText,
@@ -279,7 +310,14 @@ class GameManager {
         topicTitle: options.topicTitle || 'Custom',
       };
     } else {
-      const question = await pickNextQuestionForPair([humanId], gameType);
+      const question = preview
+        ? {
+            questionText: preview.question,
+            questionId: preview.questionId || null,
+            topicTitle: preview.topicTitle || null,
+            ammo: preview.ammo || null,
+          }
+        : await pickNextQuestionForPair([humanId], gameType);
       matchPayload = {
         question: question.questionText,
         questionId: question.questionId,
