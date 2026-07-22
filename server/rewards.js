@@ -26,6 +26,7 @@ const express = require('express');
 const store = require('./gameStore');
 const { getDb, getAdmin, getAuth } = require('./firestoreClient');
 const { dayKey } = require('./timeUtil');
+const { AI_OPPONENT_ID } = require('./aiOpponent');
 
 const RANK_WIN = 10;
 const RANK_LOSS = 8;
@@ -141,20 +142,33 @@ async function processResult({ gameId, gameType, outcome, reason }) {
       perUser[uid] = computePlayerRewards(roleByUid[uid], current, todayKey, gameId);
     }
 
-    // Apply balances + daily counters.
+    // Apply balances + daily counters + lifetime W/L record (shown on the
+    // profile as arguments won / lost).
     for (let i = 0; i < uids.length; i++) {
       const uid = uids[i];
       const r = perUser[uid];
+      const role = roleByUid[uid];
+      const recordField =
+        role === 'win' ? 'debateWins' : role === 'loss' ? 'debateLosses' : 'debateDraws';
       tx.set(
         userRefs[i],
         {
           rankTokens: r.newRank,
           sparkTokens: r.newSpark,
           lastDebateDay: todayKey,
-          debatesToday: r.newDebatesToday
+          debatesToday: r.newDebatesToday,
+          [recordField]: FieldValue.increment(1)
         },
         { merge: true }
       );
+      // Mirror the record to the public profile so other players can see it.
+      if (uid !== AI_OPPONENT_ID) {
+        tx.set(
+          db.collection('publicProfiles').doc(uid),
+          { [recordField]: FieldValue.increment(1) },
+          { merge: true }
+        );
+      }
       // One tokenHistory entry per change.
       for (const h of r.history) {
         const histRef = userRefs[i].collection('tokenHistory').doc();

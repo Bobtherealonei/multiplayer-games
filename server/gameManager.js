@@ -236,6 +236,14 @@ class GameManager {
     let matchPayload = null;
     let customPayload = null;
 
+    // AI debates let the player pick their side; fall back to random when the
+    // client didn't send one (older builds).
+    const requestedSide =
+      options.side === 'support' || options.side === 'oppose' ? options.side : null;
+    const humanSide = requestedSide || (Math.random() < 0.5 ? 'support' : 'oppose');
+    const aiSide = humanSide === 'support' ? 'oppose' : 'support';
+    const chosenPositions = { [humanId]: humanSide, [AI_OPPONENT_ID]: aiSide };
+
     const philosopher = options.philosopher || null;
     const philosopherPersona = philosopher ? getPhilosopherPersona(philosopher) : null;
 
@@ -255,16 +263,12 @@ class GameManager {
         console.warn('[gameManager] philosopher trending pick failed, using fallback:', err.message);
         questionText = pickPhilosophyQuestion();
       }
-      const positions =
-        Math.random() < 0.5
-          ? { [humanId]: 'support', [AI_OPPONENT_ID]: 'oppose' }
-          : { [humanId]: 'oppose', [AI_OPPONENT_ID]: 'support' };
       matchPayload = {
         question: questionText,
         questionId,
         topicTitle: philosopherPersona.displayName,
         categoryId: gameType,
-        positions,
+        positions: chosenPositions,
         ammo: questionAmmo,
       };
     } else if (gameType === 'custom') {
@@ -276,16 +280,12 @@ class GameManager {
       };
     } else {
       const question = await pickNextQuestionForPair([humanId], gameType);
-      const positions =
-        Math.random() < 0.5
-          ? { [humanId]: 'support', [AI_OPPONENT_ID]: 'oppose' }
-          : { [humanId]: 'oppose', [AI_OPPONENT_ID]: 'support' };
       matchPayload = {
         question: question.questionText,
         questionId: question.questionId,
         topicTitle: question.topicTitle,
         categoryId: gameType,
-        positions,
+        positions: chosenPositions,
         ammo: question.ammo || null,
       };
     }
@@ -582,6 +582,35 @@ class GameManager {
     console.log(`Game ended: ${gameId}`);
   }
 
+  // Post-debate teardown for ONE player: clear their game mapping and room
+  // membership but keep the game alive for the other player (still reading
+  // their scores). Once the last human is gone, the game is fully ended.
+  async _leaveGameSolo(gameId, playerId) {
+    const t = this.pendingDisconnects.get(playerId);
+    if (t) {
+      clearTimeout(t);
+      this.pendingDisconnects.delete(playerId);
+    }
+    await store.clearPlayerGame(playerId);
+    try {
+      const sockets = await this.io.in(userRoom(playerId)).fetchSockets();
+      for (const s of sockets) {
+        await s.leave(gameRoom(gameId));
+      }
+    } catch (err) {
+      console.error(`[gameManager] solo leave room cleanup failed for ${playerId}:`, err.message);
+    }
+
+    const state = await store.loadGameState(gameId);
+    if (!state) return;
+    const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+    const otherStillIn =
+      otherId && otherId !== AI_OPPONENT_ID ? await store.getPlayerGame(otherId) : null;
+    if (otherStillIn !== gameId) {
+      await this.endGame(gameId);
+    }
+  }
+
   async handleLeaveGame(playerId, message = 'Player has disconnected') {
     const gameId = await store.getPlayerGame(playerId);
     if (!gameId) return;
@@ -598,12 +627,25 @@ class GameManager {
 
     // If the debate had already started, quitting counts as a loss for the
     // quitter and a win for the opponent. Process BEFORE teardown so the game
-    // state (player IDs, startedAt) is still in Redis. Idempotent.
+    // state (player IDs, startedAt) is still in Redis. Idempotent. (When a
+    // judge verdict already exists, processForfeit finalizes THAT outcome
+    // instead — leaving the results screen never flips a win to a loss.)
     try {
       await rewards.processForfeit(gameId, playerId);
     } catch (err) {
       console.error('[gameManager] forfeit (leave) failed:', err.message);
     }
+
+    // Debate already judged? The game only exists so players can read their
+    // scores — one player leaving must not kick the other off the results
+    // screen. Tear down just the leaver; the game ends when the last human
+    // exits.
+    const judged = await store.getJudgeResult(gameId).catch(() => null);
+    if (judged) {
+      await this._leaveGameSolo(gameId, playerId);
+      return;
+    }
+
     this.io.to(gameRoom(gameId)).emit('playerLeft', { message, gameId });
     await this.endGame(gameId);
   }
@@ -641,7 +683,9 @@ class GameManager {
       });
     }
 
-    await this.endGame(gameId);
+    // Pass happens on the results screen — tear down only the passer so the
+    // other player can finish reading their scores.
+    await this._leaveGameSolo(gameId, playerId);
   }
 
   // Schedule, not execute, the "opponent disconnected" notification. Local
@@ -688,6 +732,14 @@ class GameManager {
             message: 'Player has disconnected',
             gameId
           });
+        }
+
+        // Post-judging, a disconnect only removes that player — the other
+        // player keeps their results screen.
+        const judged = await store.getJudgeResult(gameId).catch(() => null);
+        if (judged) {
+          await this._leaveGameSolo(gameId, playerId);
+          return;
         }
         await this.endGame(gameId);
       } catch (err) {
