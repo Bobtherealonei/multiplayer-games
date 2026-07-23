@@ -217,6 +217,17 @@ io.on('connection', async (socket) => {
     }
   });
 
+  // A player ended their turn early (Finish Turn button) — echo to the whole
+  // game room so both clients jump their local clocks in lockstep.
+  socket.on('finishTurn', async (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    try {
+      await gameManager.handleFinishTurn(userId, payload);
+    } catch (err) {
+      console.error('[finishTurn] failed:', err.message);
+    }
+  });
+
   // AI debates: the client asks for the AI's reply partway through the AI's
   // turn in the fixed turn schedule (so the AI "thinks" before answering).
   socket.on('requestAIReply', async (data) => {

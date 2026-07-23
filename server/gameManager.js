@@ -580,6 +580,18 @@ class GameManager {
     }
   }
 
+  // Finish Turn: relay to the game room so both clients fast-forward to the
+  // end of the given turn. The turn clock itself is client-side; the server
+  // just keeps the two clients in sync.
+  async handleFinishTurn(playerId, payload) {
+    const gameId = await store.getPlayerGame(playerId);
+    if (!gameId) return;
+    if (payload?.gameId && payload.gameId !== gameId) return;
+    const turnIndex = Number.isInteger(payload?.turnIndex) ? payload.turnIndex : null;
+    if (turnIndex === null || turnIndex < 0) return;
+    this.io.to(gameRoom(gameId)).emit('turnFinished', { gameId, turnIndex, playerId });
+  }
+
   // Caller may already have a hydrated game instance (saves a Redis read).
   async sendGameState(gameId, gameInstance) {
     let game = gameInstance;

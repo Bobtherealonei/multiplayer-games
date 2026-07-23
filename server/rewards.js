@@ -107,9 +107,17 @@ function computePlayerRewards(role, current, todayKey, debateId) {
   };
 }
 
+// Anti-farming: debates shorter than this pay NOTHING (no tokens, no W/L
+// record). Blocks the "friend sends one message then quits" collusion loop —
+// a real debate can't finish this fast.
+const MIN_REWARDED_DEBATE_MS =
+  Number(process.env.MIN_REWARDED_DEBATE_MS) || 2 * 60 * 1000;
+
 // Core transaction. outcome = { result: 'win'|'draw', winnerId, loserId } for
 // a decisive game, or { result: 'draw', drawA, drawB } for a tie.
-async function processResult({ gameId, gameType, outcome, reason }) {
+// `startedAt` (ms) enables the minimum-duration check; measured to NOW, which
+// is when the result is first processed — right at debate end.
+async function processResult({ gameId, gameType, outcome, reason, startedAt }) {
   const db = getDb();
   if (!db) throw new Error('Firestore unavailable');
   const admin = getAdmin();
@@ -117,6 +125,9 @@ async function processResult({ gameId, gameType, outcome, reason }) {
 
   const resultRef = db.collection('debateResults').doc(gameId);
   const todayKey = dayKey();
+
+  const durationMs = Number(startedAt) > 0 ? Date.now() - Number(startedAt) : null;
+  const tooShort = durationMs !== null && durationMs < MIN_REWARDED_DEBATE_MS;
 
   // Map outcome -> per-uid role.
   const isDraw = outcome.result === 'draw';
@@ -132,6 +143,37 @@ async function processResult({ gameId, gameType, outcome, reason }) {
     const existing = await tx.get(resultRef);
     if (existing.exists && existing.data().rewardsProcessed === true) {
       return { alreadyProcessed: true, ...existing.data() };
+    }
+
+    // Too-short debate: record the result (idempotence) but pay nothing and
+    // don't touch anyone's tokens or W/L record.
+    if (tooShort) {
+      const winnerId = isDraw ? null : outcome.winnerId;
+      const loserId = isDraw ? null : outcome.loserId;
+      tx.set(resultRef, {
+        rewardsProcessed: true,
+        rewardsSkipped: 'too_short',
+        durationMs,
+        gameId,
+        gameType: gameType || null,
+        result: outcome.result,
+        winnerId,
+        loserId,
+        reason: reason || 'completed',
+        completedAt: FieldValue.serverTimestamp()
+      });
+      console.log(
+        `[rewards] gameId=${gameId} too short (${Math.round(durationMs / 1000)}s) — no rewards`
+      );
+      return {
+        alreadyProcessed: false,
+        tooShort: true,
+        result: outcome.result,
+        winnerId,
+        loserId,
+        balances: null,
+        applied: Object.fromEntries(uids.map((uid) => [uid, { rank: 0, spark: 0 }]))
+      };
     }
 
     const snaps = await Promise.all(userRefs.map((ref) => tx.get(ref)));
@@ -253,7 +295,8 @@ async function processForfeit(gameId, quitterId) {
       gameId,
       gameType,
       outcome,
-      reason: judgedOutcome ? 'completed' : 'forfeit'
+      reason: judgedOutcome ? 'completed' : 'forfeit',
+      startedAt: state.startedAt
     });
   } catch (err) {
     console.error('[rewards] processForfeit failed:', err.message);
@@ -307,7 +350,8 @@ function makeRouter() {
         gameId,
         gameType: state.gameType,
         outcome,
-        reason: 'completed'
+        reason: 'completed',
+        startedAt: state.startedAt
       });
       // Return only the caller's view.
       const myBalances = summary.balances ? summary.balances[uid] : null;
@@ -317,6 +361,7 @@ function makeRouter() {
         result: summary.result,
         winnerId: summary.winnerId,
         loserId: summary.loserId,
+        tooShort: summary.tooShort === true || summary.rewardsSkipped === 'too_short',
         balances: myBalances,
         applied: myApplied
       });

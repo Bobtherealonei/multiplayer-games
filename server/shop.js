@@ -65,6 +65,13 @@ function makeRouter() {
           return { ok: false, code: 'item_expired' };
         }
 
+        // One-of-one items: the first buyer claims it forever. `ownedBy` is
+        // stamped inside this same transaction, so two simultaneous buyers
+        // can't both win.
+        if (item.oneOfOne && item.ownedBy && item.ownedBy !== uid) {
+          return { ok: false, code: 'sold_out' };
+        }
+
         if (invSnap.exists) {
           return { ok: false, code: 'already_owned' };
         }
@@ -82,6 +89,10 @@ function makeRouter() {
 
         const newSpark = spark - price;
         tx.set(userRef, { sparkTokens: newSpark }, { merge: true });
+
+        if (item.oneOfOne) {
+          tx.set(itemRef, { ownedBy: uid, soldAt: FieldValue.serverTimestamp() }, { merge: true });
+        }
 
         tx.set(invRef, {
           itemId,
@@ -109,6 +120,7 @@ function makeRouter() {
       switch (result.code) {
         case 'item_unavailable': return res.status(404).json({ error: 'Item unavailable', code: result.code });
         case 'item_expired':     return res.status(409).json({ error: 'Item expired', code: result.code });
+        case 'sold_out':         return res.status(409).json({ error: 'This one-of-one item has already been claimed', code: result.code });
         case 'already_owned':    return res.status(409).json({ error: 'Already owned', code: result.code });
         case 'insufficient_funds': return res.status(402).json({ error: 'Not enough Spark Tokens', code: result.code, sparkTokens: result.sparkTokens });
         default:                 return res.status(400).json({ error: 'Purchase failed', code: result.code });

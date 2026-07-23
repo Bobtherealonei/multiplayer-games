@@ -71,7 +71,12 @@ const CATALOG = [
   { id: 'frame_eclipse_mythic', name: 'Eclipse Frame', description: 'A mythic ring of molten gold circling the dark.', category: 'frame', rarity: RARITY.MYTHIC, price: 420, imageName: 'circle.circle.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FFD23D', secondaryColorHex: '#1A1A24', effect: 'glow' },
   { id: 'color_aurora_mythic', name: 'Aurora Name', description: 'A mythic name that flows through the colors of the northern lights.', category: 'usernameColor', rarity: RARITY.MYTHIC, price: 380, imageName: 'textformat', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#3DFFB0', secondaryColorHex: '#B06CFF', effect: 'rainbow' },
   { id: 'badge_immortal_mythic', name: 'Immortal Badge', description: 'A mythic badge reserved for the rarest of debaters.', category: 'badge', rarity: RARITY.MYTHIC, price: 500, imageName: 'laurel.leading', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FF5CD0', bannerText: 'Immortal', bannerColorHex: '#7A1A5C', effect: 'rainbow' },
-  { id: 'badge_founder_gold', name: 'Golden Founder Badge', description: 'A legendary badge dipped in pure gold, with a moving sheen.', category: 'badge', rarity: RARITY.LEGENDARY, price: 260, imageName: 'medal.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FFD700', bannerText: 'Golden Founder', bannerColorHex: '#8A6A00', effect: 'shimmer' }
+  { id: 'badge_founder_gold', name: 'Golden Founder Badge', description: 'A legendary badge dipped in pure gold, with a moving sheen.', category: 'badge', rarity: RARITY.LEGENDARY, price: 260, imageName: 'medal.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#FFD700', bannerText: 'Golden Founder', bannerColorHex: '#8A6A00', effect: 'shimmer' },
+
+  // ── One-of-one (oneOfOne: true) ─────────────────────────────────────────
+  // Exactly ONE player in the world can ever own this. The purchase endpoint
+  // stamps `ownedBy` on the shopItems doc; after that it's sold out forever.
+  { id: 'badge_the_one', name: 'The One', description: 'A one-of-one crown badge. Only a single debater in the world will ever wear it.', category: 'badge', rarity: RARITY.MYTHIC, price: 1000000, imageName: 'crown.fill', isAnimated: true, rotationType: 'special', isLimited: true, oneOfOne: true, colorHex: '#FFD700', secondaryColorHex: '#FF5CD0', bannerText: 'The One', bannerColorHex: '#5C1A7A', effect: 'rainbow' }
 ];
 
 module.exports = { CATALOG, RARITY };
