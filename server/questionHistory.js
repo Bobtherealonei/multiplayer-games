@@ -3,14 +3,12 @@
 // users/{userId}/questionHistory/{questionId}
 //   questionId, shownAt, position, matched, debated
 //
-// Used to avoid showing the same question twice in a session and to deprioritize
-// recently debated prompts.
+// Used to avoid showing the same question twice in a session, and to
+// PERMANENTLY exclude questions the user has already debated.
 
 const { getDb, getAdmin } = require('./firestoreClient');
 
 const RECENT_SHOWN_LIMIT = Number(process.env.QUESTION_HISTORY_LIMIT) || 50;
-const DEBATED_COOLDOWN_MS =
-  Number(process.env.QUESTION_DEBATED_COOLDOWN_MS) || 21 * 24 * 60 * 60 * 1000;
 
 async function recordQuestionShown(userId, questionId, { position = null } = {}) {
   const db = getDb();
@@ -92,25 +90,17 @@ async function getExcludedQuestionIds(userId, { sessionExcluded = new Set(), que
   if (!db || !userId) return excluded;
 
   try {
-    const snap = await db
-      .collection('users')
-      .doc(userId)
-      .collection('questionHistory')
-      .orderBy('shownAt', 'desc')
-      .limit(RECENT_SHOWN_LIMIT)
-      .get();
+    // Two exclusion sources:
+    //  1. Recently shown (last N) — avoids quick repeats of merely-seen prompts.
+    //  2. Every question the user has ever DEBATED — permanent, never re-served.
+    const historyRef = db.collection('users').doc(userId).collection('questionHistory');
+    const [recentSnap, debatedSnap] = await Promise.all([
+      historyRef.orderBy('shownAt', 'desc').limit(RECENT_SHOWN_LIMIT).get(),
+      historyRef.where('debated', '==', true).select().get()
+    ]);
 
-    const now = Date.now();
-    snap.forEach((doc) => {
-      excluded.add(doc.id);
-      const data = doc.data();
-      if (data.debated && data.debatedAt) {
-        const debatedAt = data.debatedAt.toMillis?.() ?? data.debatedAt ?? 0;
-        if (now - debatedAt < DEBATED_COOLDOWN_MS) {
-          excluded.add(doc.id);
-        }
-      }
-    });
+    recentSnap.forEach((doc) => excluded.add(doc.id));
+    debatedSnap.forEach((doc) => excluded.add(doc.id));
   } catch (err) {
     console.warn('[questionHistory] getExcluded failed:', err.message);
   }
@@ -120,7 +110,6 @@ async function getExcludedQuestionIds(userId, { sessionExcluded = new Set(), que
 
 module.exports = {
   RECENT_SHOWN_LIMIT,
-  DEBATED_COOLDOWN_MS,
   recordQuestionShown,
   recordQuestionAnswered,
   markQuestionMatched,

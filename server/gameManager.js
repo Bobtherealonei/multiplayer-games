@@ -443,6 +443,12 @@ class GameManager {
       } catch (err) {
         console.warn('[gameManager] recordSeen failed:', err.message);
       }
+      // Debated questions are permanently excluded from future picks.
+      for (const uid of [player1Id, player2Id]) {
+        if (uid && uid !== AI_OPPONENT_ID) {
+          markQuestionDebated(uid, chosen.questionId).catch(() => {});
+        }
+      }
     }
 
     // Broadcast updated state to both players via the game room.
