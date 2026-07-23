@@ -38,7 +38,11 @@ const {
 } = require('./aiOpponent');
 const { pickNextQuestionForPair } = require('./questionPicker');
 
-const RECONNECT_GRACE_MS = 12000;
+// How long a disconnected player can be gone (e.g. app backgrounded) before
+// the game counts it as a forfeit. Generous on purpose: the debate clock keeps
+// running while they're away, so missed turns already cost them — and the
+// reconnect flow restores the clock mid-debate.
+const RECONNECT_GRACE_MS = 45000;
 
 function userRoom(userId) { return `user:${userId}`; }
 function gameRoom(gameId) { return `game:${gameId}`; }
@@ -172,6 +176,11 @@ class GameManager {
         }
       : {};
 
+    // Server-measured ms since the game was created — the client anchors its
+    // debate clock to this (skew-free), so backgrounding/reconnecting never
+    // resets the timer. ~0 here; meaningful on reattach.
+    const clockElapsedMs = Math.max(0, Date.now() - (Number(game.createdAt) || Date.now()));
+
     if (player1Id !== AI_OPPONENT_ID) {
       this.io.to(userRoom(player1Id)).emit('gameFound', {
         gameId,
@@ -182,6 +191,7 @@ class GameManager {
         position: p1Position,
         opponentPosition: p2Position,
         question: game.question,
+        clockElapsedMs,
         ...aiMeta,
       });
     }
@@ -195,6 +205,7 @@ class GameManager {
         position: p2Position,
         opponentPosition: p1Position,
         question: game.question,
+        clockElapsedMs,
       });
     }
 
@@ -843,13 +854,22 @@ class GameManager {
         symbol,
         opponentUid,
         opponent: opponentUid,
-        gameType: game.gameType
+        gameType: game.gameType,
+        // Server-measured debate age so the rejoining client resumes its
+        // clock exactly where the debate actually is, instead of resetting.
+        clockElapsedMs: Math.max(0, Date.now() - (Number(game.createdAt) || Date.now()))
       });
       socket.emit('gameState', {
         player1Symbol: game.player1Symbol,
         player2Symbol: game.player2Symbol,
         gameType: game.gameType,
         ...game.getState()
+      });
+      // Replay the full chat log so messages that arrived while the app was
+      // backgrounded aren't lost.
+      socket.emit('chatHistory', {
+        gameId,
+        chatLog: Array.isArray(state.chatLog) ? state.chatLog : []
       });
     }
     return true;
