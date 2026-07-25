@@ -118,15 +118,16 @@ const CATALOG = [
   { id: 'badge_celestial_mythic', name: 'Celestial Badge', description: 'A mythic badge written in constellations.', category: 'badge', rarity: RARITY.MYTHIC, price: 470, imageName: 'moon.stars.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#9AC4E8', bannerText: 'Celestial', bannerColorHex: '#2E3A8C', effect: 'rainbow' },
   { id: 'badge_kingmaker', name: 'Kingmaker Badge', description: 'A legendary badge for those who decide who wins.', category: 'badge', rarity: RARITY.LEGENDARY, price: 280, imageName: 'checkmark.seal.fill', isAnimated: true, rotationType: 'special', isLimited: true, colorHex: '#C9A962', bannerText: 'Kingmaker', bannerColorHex: '#6B4A0F', effect: 'shimmer' },
 
-  // ── Limited runs (limitedStock) ─────────────────────────────────────────
+  // ── Limited run (limitedStock) ──────────────────────────────────────────
   // Exactly `limitedStock` copies exist worldwide. The purchase endpoint
   // increments `soldCount` on the shopItems doc inside the purchase
   // transaction; once soldCount reaches limitedStock the item is gone
   // forever. NOTE: never put `soldCount` in this catalog — the deploy-time
   // sync would reset the live counter.
-  { id: 'frame_first_edition', name: 'First Edition Frame', description: 'A numbered first-edition ring in rose gold and platinum. Only 999 will ever be minted.', category: 'frame', rarity: RARITY.LEGENDARY, price: 850, imageName: 'seal.fill', isAnimated: true, rotationType: 'limited', isLimited: true, limitedStock: 999, colorHex: '#E8A9A0', secondaryColorHex: '#E8F4FF', effect: 'shimmer' },
-  { id: 'badge_founders_mark', name: "Founder's Mark", description: 'A limited badge for the first 999 debaters bold enough to claim it.', category: 'badge', rarity: RARITY.LEGENDARY, price: 750, imageName: 'signature', isAnimated: true, rotationType: 'limited', isLimited: true, limitedStock: 999, colorHex: '#FFD700', bannerText: "Founder's Mark", bannerColorHex: '#6B4A0F', effect: 'shimmer' },
-  { id: 'color_founders_ink', name: "Founder's Ink Name", description: 'A limited midnight-and-gold gradient name. 999 copies, then never again.', category: 'usernameColor', rarity: RARITY.LEGENDARY, price: 600, imageName: 'textformat', isAnimated: true, rotationType: 'limited', isLimited: true, limitedStock: 999, colorHex: '#2E3A8C', secondaryColorHex: '#FFD700', effect: 'shimmer' }
+  //
+  // There is exactly ONE limited item at a time. It does NOT rotate — it
+  // stays in the shop until it sells out or is manually replaced here.
+  { id: 'frame_first_edition', name: 'First Edition Frame', description: 'A numbered first-edition ring in rose gold and platinum. Only 999 will ever be minted.', category: 'frame', rarity: RARITY.LEGENDARY, price: 850, imageName: 'seal.fill', isAnimated: true, rotationType: 'limited', isLimited: true, limitedStock: 999, colorHex: '#E8A9A0', secondaryColorHex: '#E8F4FF', effect: 'shimmer' }
 ];
 
 module.exports = { CATALOG, RARITY };
