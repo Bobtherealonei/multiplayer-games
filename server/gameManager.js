@@ -586,6 +586,17 @@ class GameManager {
         gameId,
         playerId: AI_OPPONENT_ID,
       });
+
+      // The AI is done as soon as it answers — auto-finish its turn so the
+      // human doesn't sit through the rest of the AI's clock. Same event the
+      // Finish Turn button uses; the client fast-forwards to the turn's end.
+      if (turnIndex !== null) {
+        this.io.to(userRoom(playerId)).emit('turnFinished', {
+          gameId,
+          turnIndex,
+          playerId: AI_OPPONENT_ID,
+        });
+      }
     } catch (err) {
       console.error('[gameManager] AI turn reply failed:', err.message);
     }
