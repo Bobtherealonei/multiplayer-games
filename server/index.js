@@ -125,6 +125,13 @@ io.on('connection', async (socket) => {
     const gameType = payload?.gameType || 'religion'; // Default to "Trending in the USA"
     try {
       await store.touchPlayerOnline(userId);
+      // Already mid-debate (e.g. the app was closed and reopened)? Put the
+      // player back into their live game instead of matching a new one —
+      // rematching would restart the debate.
+      if (await gameManager.reattachSocket(userId, socket)) {
+        console.log(`[findMatch] ${userId} already in a game — reattached instead of rematching`);
+        return;
+      }
       await matchmaking.addPlayer(socket, gameType, userId, payload || {});
     } catch (err) {
       console.error('[findMatch] failed:', err.message);
@@ -170,6 +177,12 @@ io.on('connection', async (socket) => {
     socket.data.aiQuestionPreview = null;
     try {
       await store.touchPlayerOnline(userId);
+      // Same rejoin guard as findMatch: never spin up a second game for a
+      // player whose debate is still live.
+      if (await gameManager.reattachSocket(userId, socket)) {
+        console.log(`[matchWithAI] ${userId} already in a game — reattached instead of rematching`);
+        return;
+      }
       await matchmaking.removePlayer(userId);
       await gameManager.createAIGame(userId, gameType, { ...(payload || {}), preview });
       socket.emit('matchmakingStatus', { status: 'aiMatched', gameType });

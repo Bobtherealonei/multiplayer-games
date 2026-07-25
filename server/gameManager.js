@@ -590,7 +590,9 @@ class GameManager {
       // The AI is done as soon as it answers — auto-finish its turn so the
       // human doesn't sit through the rest of the AI's clock. Same event the
       // Finish Turn button uses; the client fast-forwards to the turn's end.
+      // Persisted too, so a backgrounded client rebuilds it on reattach.
       if (turnIndex !== null) {
+        await this._recordFinishedTurn(gameId, turnIndex);
         this.io.to(userRoom(playerId)).emit('turnFinished', {
           gameId,
           turnIndex,
@@ -603,15 +605,32 @@ class GameManager {
   }
 
   // Finish Turn: relay to the game room so both clients fast-forward to the
-  // end of the given turn. The turn clock itself is client-side; the server
-  // just keeps the two clients in sync.
+  // end of the given turn. The event is ALSO persisted on the game state so
+  // a client that was backgrounded/disconnected when it fired can rebuild
+  // the exact same clock on reattach.
   async handleFinishTurn(playerId, payload) {
     const gameId = await store.getPlayerGame(playerId);
     if (!gameId) return;
     if (payload?.gameId && payload.gameId !== gameId) return;
     const turnIndex = Number.isInteger(payload?.turnIndex) ? payload.turnIndex : null;
     if (turnIndex === null || turnIndex < 0) return;
+    await this._recordFinishedTurn(gameId, turnIndex);
     this.io.to(gameRoom(gameId)).emit('turnFinished', { gameId, turnIndex, playerId });
+  }
+
+  // Append a finished-turn event to the game state (idempotent per turn).
+  async _recordFinishedTurn(gameId, turnIndex) {
+    try {
+      const state = await store.loadGameState(gameId);
+      if (!state) return;
+      const list = Array.isArray(state.finishedTurns) ? state.finishedTurns : [];
+      if (list.some((e) => e && e.turnIndex === turnIndex)) return;
+      await store.patchGameState(gameId, {
+        finishedTurns: [...list, { turnIndex, atMs: Date.now() }]
+      });
+    } catch (err) {
+      console.error('[gameManager] recordFinishedTurn failed:', err.message);
+    }
   }
 
   // Caller may already have a hydrated game instance (saves a Redis read).
@@ -856,19 +875,41 @@ class GameManager {
     // client doesn't have a stale view.
     const game = this._hydrate(state);
     if (game) {
-      const symbol =
-        userId === game.player1Id ? game.player1Symbol : game.player2Symbol;
-      const opponentUid =
-        userId === game.player1Id ? game.player2Id : game.player1Id;
+      const isP1 = userId === game.player1Id;
+      const symbol = isP1 ? game.player1Symbol : game.player2Symbol;
+      const opponentUid = isP1 ? game.player2Id : game.player1Id;
+      const createdAtMs = Number(game.createdAt) || Date.now();
+      // Finished-turn events as SERVER-side elapsed offsets from game
+      // creation, so the client can rebuild its skip clock without any
+      // device-clock skew.
+      const finishedTurns = (Array.isArray(state.finishedTurns) ? state.finishedTurns : [])
+        .filter((e) => e && Number.isInteger(e.turnIndex))
+        .map((e) => ({
+          turnIndex: e.turnIndex,
+          elapsedMs: Math.max(0, (Number(e.atMs) || createdAtMs) - createdAtMs)
+        }));
+      const aiPersona = state.aiPersona || null;
       socket.emit('gameFound', {
         gameId,
         symbol,
         opponentUid,
         opponent: opponentUid,
         gameType: game.gameType,
+        position: isP1 ? game.player1Position : game.player2Position,
+        opponentPosition: isP1 ? game.player2Position : game.player1Position,
+        question: game.question,
         // Server-measured debate age so the rejoining client resumes its
         // clock exactly where the debate actually is, instead of resetting.
-        clockElapsedMs: Math.max(0, Date.now() - (Number(game.createdAt) || Date.now()))
+        clockElapsedMs: Math.max(0, Date.now() - createdAtMs),
+        finishedTurns,
+        ...(aiPersona
+          ? {
+              isAIOpponent: true,
+              opponentName: aiPersona.displayName,
+              opponentUsername: aiPersona.username,
+              opponentImageURL: aiPersona.imageURL,
+            }
+          : {}),
       });
       socket.emit('gameState', {
         player1Symbol: game.player1Symbol,
