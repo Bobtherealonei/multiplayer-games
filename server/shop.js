@@ -60,6 +60,11 @@ function makeRouter() {
           return { ok: false, code: 'item_unavailable' };
         }
 
+        // Admin-hidden items are temporarily removed from the store.
+        if (item.hidden === true) {
+          return { ok: false, code: 'item_unavailable' };
+        }
+
         // Expired / time-limited item check.
         if (item.availableUntil && Number(item.availableUntil) < Date.now()) {
           return { ok: false, code: 'item_expired' };
@@ -102,7 +107,11 @@ function makeRouter() {
         if (item.oneOfOne) {
           tx.set(itemRef, { ownedBy: uid, soldAt: FieldValue.serverTimestamp() }, { merge: true });
         }
+        // Limited runs get a collector serial number: buyer N of the run gets
+        // #N. Assigned inside the transaction, so serials are unique.
+        let serial = null;
         if (isLimitedRun) {
+          serial = (Number(item.soldCount) || 0) + 1;
           tx.set(itemRef, { soldCount: FieldValue.increment(1) }, { merge: true });
         }
 
@@ -111,7 +120,8 @@ function makeRouter() {
           category: item.category || null,
           purchasedAt: FieldValue.serverTimestamp(),
           purchasePrice: price,
-          isEquipped: false
+          isEquipped: false,
+          ...(serial ? { serial, serialOf: limitedStock } : {})
         });
 
         const histRef = userRef.collection('tokenHistory').doc();
@@ -123,11 +133,11 @@ function makeRouter() {
           timestamp: FieldValue.serverTimestamp()
         });
 
-        return { ok: true, sparkTokens: newSpark, category: item.category, itemId };
+        return { ok: true, sparkTokens: newSpark, category: item.category, itemId, serial };
       });
 
       if (result.ok) {
-        return res.json({ status: 'purchased', sparkTokens: result.sparkTokens, itemId: result.itemId, category: result.category });
+        return res.json({ status: 'purchased', sparkTokens: result.sparkTokens, itemId: result.itemId, category: result.category, serial: result.serial });
       }
       switch (result.code) {
         case 'item_unavailable': return res.status(404).json({ error: 'Item unavailable', code: result.code });

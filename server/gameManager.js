@@ -151,6 +151,12 @@ class GameManager {
     }
     await store.saveGameState(gameId, serialized);
 
+    // Ranked topic games: don't rematch this pair for a while. Custom /
+    // friendly / AI debates are opt-in (or not human) so they skip this.
+    if (!isAIGame && gameType !== 'custom' && player1Id !== AI_OPPONENT_ID && player2Id !== AI_OPPONENT_ID) {
+      await store.addAvoidPair(player1Id, player2Id);
+    }
+
     const playerGameWrites = [];
     if (player1Id !== AI_OPPONENT_ID) playerGameWrites.push(store.setPlayerGame(player1Id, gameId));
     if (player2Id !== AI_OPPONENT_ID) playerGameWrites.push(store.setPlayerGame(player2Id, gameId));

@@ -419,7 +419,7 @@ async function clearQueueMeta(queueKey) {
 // ── Pre-debate lobby ────────────────────────────────────────────────────
 
 const PLAYER_LOBBY_TTL_SECONDS = 120;
-const AVOID_PAIR_TTL_SECONDS = 10 * 60;
+const AVOID_PAIR_TTL_SECONDS = 30 * 60;
 
 async function setPlayerLobby(userId, lobbyId) {
   if (!userId || !lobbyId) return;

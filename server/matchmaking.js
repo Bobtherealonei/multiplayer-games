@@ -54,7 +54,9 @@ class Matchmaking {
       await store.setQueueMeta(queueKey, {
         customDebateId: options.customDebateId,
         question: options.question,
-        topicTitle: options.topicTitle || 'Custom'
+        topicTitle: options.topicTitle || 'Custom',
+        // Friend challenges from chat: spark-token rewards only, no trophies.
+        friendly: options.friendly === true
       });
       await store.enqueuePlayer(queueKey, userId);
       socket.emit('matchmakingStatus', { status: 'searching', gameType: 'custom' });
@@ -107,8 +109,12 @@ class Matchmaking {
       const { user1, user2 } = pair;
 
       if (await store.shouldAvoidPair(user1, user2)) {
+        // Keep the older waiter at the front so they can pair with someone
+        // else; delay the other so this loop doesn't instantly re-pop the
+        // same two people.
         await store.returnToQueue(gameType, user1, Date.now());
-        await store.returnToQueue(gameType, user2, Date.now() + 1);
+        await store.returnToQueue(gameType, user2, Date.now() + 15_000);
+        this._scheduleTopicRetry(gameType, 1500);
         continue;
       }
 

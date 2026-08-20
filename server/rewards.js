@@ -19,8 +19,8 @@
 //     win: +2 completion, +8 win bonus, daily bonuses (first of day +3, 3rd of day +4)
 //     loss: 0
 //     draw: +1 total (no rank tokens, no daily bonuses)
-//   A debate with no official result (never started / abandoned pre-start) is
-//   skipped entirely.
+//   A debate with no official result (abandoned before matching) is skipped.
+//   Friend challenges (friendly=true) and silent forfeits pay nothing.
 
 const express = require('express');
 const store = require('./gameStore');
@@ -117,7 +117,16 @@ const MIN_REWARDED_DEBATE_MS =
 // a decisive game, or { result: 'draw', drawA, drawB } for a tie.
 // `startedAt` (ms) enables the minimum-duration check; measured to NOW, which
 // is when the result is first processed — right at debate end.
-async function processResult({ gameId, gameType, outcome, reason, startedAt }) {
+async function processResult({
+  gameId,
+  gameType,
+  outcome,
+  reason,
+  startedAt,
+  friendly = false,
+  skipDurationCheck = false,
+  skipRewardsReason = null
+}) {
   const db = getDb();
   if (!db) throw new Error('Firestore unavailable');
   const admin = getAdmin();
@@ -127,7 +136,7 @@ async function processResult({ gameId, gameType, outcome, reason, startedAt }) {
   const todayKey = dayKey();
 
   const durationMs = Number(startedAt) > 0 ? Date.now() - Number(startedAt) : null;
-  const tooShort = durationMs !== null && durationMs < MIN_REWARDED_DEBATE_MS;
+  const tooShort = !skipDurationCheck && durationMs !== null && durationMs < MIN_REWARDED_DEBATE_MS;
 
   // Map outcome -> per-uid role.
   const isDraw = outcome.result === 'draw';
@@ -139,23 +148,28 @@ async function processResult({ gameId, gameType, outcome, reason, startedAt }) {
 
   const userRefs = uids.map((uid) => db.collection('users').doc(uid));
 
+  // Friendly challenges, silent forfeits, and too-short judged debates
+  // record a result for idempotence but never touch tokens or W/L.
+  let rewardsSkipped = skipRewardsReason || null;
+  if (friendly) rewardsSkipped = rewardsSkipped || 'friendly';
+  if (tooShort) rewardsSkipped = rewardsSkipped || 'too_short';
+
   return db.runTransaction(async (tx) => {
     const existing = await tx.get(resultRef);
     if (existing.exists && existing.data().rewardsProcessed === true) {
       return { alreadyProcessed: true, ...existing.data() };
     }
 
-    // Too-short debate: record the result (idempotence) but pay nothing and
-    // don't touch anyone's tokens or W/L record.
-    if (tooShort) {
+    if (rewardsSkipped) {
       const winnerId = isDraw ? null : outcome.winnerId;
       const loserId = isDraw ? null : outcome.loserId;
       tx.set(resultRef, {
         rewardsProcessed: true,
-        rewardsSkipped: 'too_short',
+        rewardsSkipped,
         durationMs,
         gameId,
         gameType: gameType || null,
+        friendly,
         result: outcome.result,
         winnerId,
         loserId,
@@ -163,11 +177,12 @@ async function processResult({ gameId, gameType, outcome, reason, startedAt }) {
         completedAt: FieldValue.serverTimestamp()
       });
       console.log(
-        `[rewards] gameId=${gameId} too short (${Math.round(durationMs / 1000)}s) — no rewards`
+        `[rewards] gameId=${gameId} skipped (${rewardsSkipped}) — no tokens`
       );
       return {
         alreadyProcessed: false,
-        tooShort: true,
+        tooShort: rewardsSkipped === 'too_short',
+        rewardsSkipped,
         result: outcome.result,
         winnerId,
         loserId,
@@ -203,11 +218,13 @@ async function processResult({ gameId, gameType, outcome, reason, startedAt }) {
         },
         { merge: true }
       );
-      // Mirror the record to the public profile so other players can see it.
+      // Mirror the record + rank balance to the public profile so other
+      // players can see them (users/{uid} is private; sparkTokens stay
+      // private on purpose).
       if (uid !== AI_OPPONENT_ID) {
         tx.set(
           db.collection('publicProfiles').doc(uid),
-          { [recordField]: FieldValue.increment(1) },
+          { [recordField]: FieldValue.increment(1), rankTokens: r.newRank },
           { merge: true }
         );
       }
@@ -230,6 +247,7 @@ async function processResult({ gameId, gameType, outcome, reason, startedAt }) {
       rewardsProcessed: true,
       gameId,
       gameType: gameType || null,
+      friendly,
       result: outcome.result,
       winnerId,
       loserId,
@@ -269,16 +287,31 @@ function outcomeFromJudge(state, judge) {
   return null;
 }
 
-// Forfeit: a player quit a debate that had already started -> loss for the
-// quitter, win for the opponent. Called from gameManager BEFORE the game is
-// torn down. Safe to call more than once (idempotent via debateResults).
+// True when neither human posted a non-empty debate message.
+function bothPlayersSilent(state) {
+  const chatLog = Array.isArray(state.chatLog) ? state.chatLog : [];
+  const p1 = state.player1Symbol || 'P1';
+  const p2 = state.player2Symbol || 'P2';
+  let p1Spoke = false;
+  let p2Spoke = false;
+  for (const entry of chatLog) {
+    const text = String(entry?.text || '').trim();
+    if (!text) continue;
+    if (entry.symbol === p1) p1Spoke = true;
+    else if (entry.symbol === p2) p2Spoke = true;
+  }
+  return !p1Spoke && !p2Spoke;
+}
+
+// Forfeit: a player quit after they were matched. If neither person spoke,
+// it's a no-reward tie. Otherwise the quitter loses and the opponent wins,
+// even if the debate was very short. Called from gameManager BEFORE the
+// game is torn down. Safe to call more than once (idempotent via debateResults).
 async function processForfeit(gameId, quitterId) {
   const db = getDb();
   if (!db) return null;
   const state = await store.loadGameState(gameId);
   if (!state) return null;
-  // Only started debates count (spec: ignore abandons before it begins).
-  if (!state.startedAt) return null;
   const { player1Id, player2Id, gameType } = state;
   if (!player1Id || !player2Id) return null;
   if (quitterId !== player1Id && quitterId !== player2Id) return null;
@@ -288,15 +321,23 @@ async function processForfeit(gameId, quitterId) {
   // turn a win into a loss. processResult is idempotent regardless.
   const judge = await store.getJudgeResult(gameId);
   const judgedOutcome = judge ? outcomeFromJudge(state, judge) : null;
-  const outcome = judgedOutcome || { result: 'win', winnerId: quitterId === player1Id ? player2Id : player1Id, loserId: quitterId };
+
+  const silent = !judgedOutcome && bothPlayersSilent(state);
+  const outcome = judgedOutcome || (silent
+    ? { result: 'draw', drawA: player1Id, drawB: player2Id }
+    : { result: 'win', winnerId: quitterId === player1Id ? player2Id : player1Id, loserId: quitterId });
 
   try {
     return await processResult({
       gameId,
       gameType,
       outcome,
-      reason: judgedOutcome ? 'completed' : 'forfeit',
-      startedAt: state.startedAt
+      reason: judgedOutcome ? 'completed' : (silent ? 'forfeit_no_speech' : 'forfeit'),
+      startedAt: state.startedAt,
+      friendly: state.isFriendly === true || state.isFriendly === 'true',
+      // Ranked forfeits still pay even under the 2-minute anti-farm window.
+      skipDurationCheck: !judgedOutcome,
+      skipRewardsReason: silent ? 'no_speech' : null
     });
   } catch (err) {
     console.error('[rewards] processForfeit failed:', err.message);
@@ -351,7 +392,8 @@ function makeRouter() {
         gameType: state.gameType,
         outcome,
         reason: 'completed',
-        startedAt: state.startedAt
+        startedAt: state.startedAt,
+        friendly: state.isFriendly === true || state.isFriendly === 'true'
       });
       // Return only the caller's view.
       const myBalances = summary.balances ? summary.balances[uid] : null;
@@ -362,6 +404,7 @@ function makeRouter() {
         winnerId: summary.winnerId,
         loserId: summary.loserId,
         tooShort: summary.tooShort === true || summary.rewardsSkipped === 'too_short',
+        rewardsSkipped: summary.rewardsSkipped || null,
         balances: myBalances,
         applied: myApplied
       });

@@ -318,6 +318,8 @@ class TopicDebate extends Game {
     this.createdAt = null;
     this.startedAt = null;
     this.customDebatePayload = null;
+    // Friendly (friend-challenge) games: spark rewards only, no rank tokens.
+    this.isFriendly = false;
     // Position-based flow: client chose the question + each player's stance
     // before matchmaking. Populated by gameManager.createGame.
     this.preChosenMatch = null;
@@ -366,6 +368,8 @@ class TopicDebate extends Game {
       this.topicKey = 'custom';
       this.topicTitle = this.customDebatePayload.topicTitle || 'Custom';
       this.question = this.customDebatePayload.question;
+      this.isFriendly = this.customDebatePayload.friendly === true
+        || this.customDebatePayload.friendly === 'true';
       this.customDebatePayload = null;
       return {
         success: true,
@@ -470,7 +474,8 @@ class TopicDebate extends Game {
       winner: this.winner,
       isDraw: this.isDraw,
       createdAt: this.createdAt,
-      startedAt: this.startedAt
+      startedAt: this.startedAt,
+      isFriendly: this.isFriendly
     };
   }
 
@@ -498,6 +503,7 @@ class TopicDebate extends Game {
     this.isDraw = state.isDraw ?? false;
     this.createdAt = state.createdAt ?? null;
     this.startedAt = state.startedAt ?? null;
+    this.isFriendly = state.isFriendly === true || state.isFriendly === 'true';
     return this;
   }
 }

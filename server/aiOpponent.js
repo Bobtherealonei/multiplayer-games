@@ -165,6 +165,21 @@ function pickFallback(position) {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+/**
+ * When OpenAI stops at max_tokens (finish_reason 'length') the text ends
+ * mid-sentence. Drop the incomplete trailing sentence so the reply still
+ * reads as finished — but only when there's at least one complete sentence
+ * to keep (casual chat replies legitimately skip ending punctuation).
+ */
+function dropTruncatedTail(text) {
+  if (!text || typeof text !== 'string') return text;
+  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  if (sentences.length < 2) return text;
+  const last = sentences[sentences.length - 1].trim();
+  if (/[.!?]$/.test(last)) return text;
+  return sentences.slice(0, -1).join(' ').trim();
+}
+
 /** Keep replies chat-sized: a substantial turn, but never a paragraph dump. */
 function trimToHumanReply(text) {
   if (!text || typeof text !== 'string') return text;
@@ -179,9 +194,13 @@ function trimToHumanReply(text) {
   const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
   cleaned = sentences.slice(0, 2).join(' ').trim();
 
+  // Over-length replies get cut at the last sentence boundary inside the cap
+  // when possible — a word-boundary chop reads like the message broke off.
   const maxChars = 220;
   if (cleaned.length > maxChars) {
-    cleaned = cleaned.slice(0, maxChars).replace(/\s+\S*$/, '').trim();
+    const cut = cleaned.slice(0, maxChars);
+    const lastEnd = Math.max(cut.lastIndexOf('.'), cut.lastIndexOf('!'), cut.lastIndexOf('?'));
+    cleaned = (lastEnd > 60 ? cut.slice(0, lastEnd + 1) : cut.replace(/\s+\S*$/, '')).trim();
   }
 
   return cleaned;
@@ -321,7 +340,10 @@ async function generateDebateReply({
       body: JSON.stringify({
         model: MODEL,
         temperature: philo ? 0.8 : 0.9,
-        max_tokens: philo ? 110 : 75,
+        // Generous headroom on purpose: reply LENGTH is controlled by the
+        // prompt + the 2-sentence trim below. A tight cap here made OpenAI
+        // hard-truncate replies mid-sentence (finish_reason 'length').
+        max_tokens: philo ? 220 : 160,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent },
@@ -336,8 +358,14 @@ async function generateDebateReply({
     }
 
     const data = await resp.json();
-    const text = data?.choices?.[0]?.message?.content?.trim();
+    const choice = data?.choices?.[0];
+    let text = choice?.message?.content?.trim();
     if (!text) return philo ? '' : pickFallback(aiPosition);
+    // Safety net: if the model still hit the token cap, remove the
+    // incomplete trailing sentence instead of showing a mid-sentence cutoff.
+    if (choice?.finish_reason === 'length') {
+      text = dropTruncatedTail(text);
+    }
     // Philosophers keep their eloquent voice — don't casualize them, but hard
     // cap at 2 sentences so replies stay chat-sized.
     if (philo) return trimToSentences(text, 2);
