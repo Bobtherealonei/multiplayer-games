@@ -67,7 +67,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'friendly-guard-3';
+const SERVER_VERSION = 'friendly-guard-4';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {

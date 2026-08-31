@@ -398,7 +398,10 @@ async function setQueueMeta(queueKey, meta) {
   const payload = {
     customDebateId: meta.customDebateId || '',
     question: meta.question || '',
-    topicTitle: meta.topicTitle || 'Custom'
+    topicTitle: meta.topicTitle || 'Custom',
+    // Redis hashes store strings; topicDebate accepts 'true'. Dropping this
+    // field here was why friendly challenges kept paying ranked rewards.
+    friendly: meta.friendly === true || meta.friendly === 'true' ? 'true' : 'false'
   };
   await client.hset(`queueMeta:${queueKey}`, payload);
   await client.expire(`queueMeta:${queueKey}`, QUEUE_META_TTL_SECONDS);
