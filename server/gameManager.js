@@ -761,9 +761,20 @@ class GameManager {
     // Debate already judged? The game only exists so players can read their
     // scores — one player leaving must not kick the other off the results
     // screen. Tear down just the leaver; the game ends when the last human
-    // exits.
+    // exits. The opponent still gets an `opponentSkipped` so their Match/Pass
+    // card resolves immediately (a match is no longer possible) instead of
+    // waiting forever on a player who already passed.
     const judged = await store.getJudgeResult(gameId).catch(() => null);
     if (judged) {
+      const otherId = state
+        ? (state.player1Id === playerId ? state.player2Id : state.player1Id)
+        : null;
+      if (otherId && otherId !== AI_OPPONENT_ID) {
+        this.io.to(userRoom(otherId)).emit('opponentSkipped', {
+          message: 'The other player skipped',
+          gameId
+        });
+      }
       await this._leaveGameSolo(gameId, playerId);
       return;
     }

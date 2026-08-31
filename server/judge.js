@@ -83,9 +83,15 @@ No Support/Oppose assignments were recorded for this debate. Score each player o
   if (oDesc) lines.push(`- ${nameO}: ${oDesc}`);
   lines.push(
     '',
-    'When scoring WITH assigned sides:',
+    'SIDE-FIDELITY CHECK (do this FIRST, for each player separately):',
+    'Before scoring quality, decide for each player whether their arguments actually defend their ASSIGNED side above.',
+    '- Argued their assigned side: score normally on the quality scale.',
+    '- Mostly argued the OPPOSITE of their assigned side (e.g. a Supporter attacking the statement, or an Opposer defending it): cap that player at 3, no matter how well-written their points are. Say so in the review.',
+    '- Mixed (some correct-side points, some wrong-side): score only the correct-side contributions and deduct 1-2 points for the confusion.',
+    '- Merely QUOTING or rebutting the opponent\'s side does not count as arguing the wrong side — only their own affirmative case matters.',
+    '',
+    'Also when scoring:',
     '- Reward clear, relevant arguments that advance their ASSIGNED side with reasoning and evidence.',
-    '- Penalize players who argue the wrong side — e.g. a Supporter arguing against the question, or an Opposer arguing in favor. Cap wrong-side players at 4 unless they also made substantial correct-side points.',
     '- Penalize ignoring the question entirely or only personal attacks (existing caps still apply).',
     '- Do NOT score based on whether you personally agree with their side — only on how well they argued the side they were assigned.',
   );
@@ -117,8 +123,9 @@ In your written review, refer to the players by name (${nameX} and ${nameO}). Do
 
 YOUR TASK
 1. Read the full transcript carefully.
-2. Score each player independently from 0 to 10 using the scale below.
-3. Write a 2-4 sentence review explaining the scores using the players' names. Quote or paraphrase the strongest specific argument from each side that actually contributed. If a player was silent or hostile, say so plainly. Do not share your personal opinion on the topic.
+2. Run the side-fidelity check above (when sides are assigned): confirm each player argued their ASSIGNED side, and apply the wrong-side cap if they didn't.
+3. Score each player independently from 0 to 10 using the scale below.
+4. Write a 2-4 sentence review explaining the scores using the players' names. Quote or paraphrase the strongest specific argument from each side that actually contributed. If a player was silent, hostile, or argued the wrong side, say so plainly. Do not share your personal opinion on the topic.
 
 You do NOT pick the winner. The application code will compare the two scores numerically — your only job is to set them honestly.
 
@@ -126,8 +133,8 @@ SCORING SCALE (apply STRICTLY — do not inflate scores out of politeness)
 - 0  = did not participate at all (no messages, or only whitespace).
 - 1  = only sent gibberish, spam, or a single useless message.
 - 2  = ONLY insults, profanity, slurs, hate speech, or trolling. No actual argument.
-- 3  = weak, off-topic, or contradictory; almost no reasoning.
-- 4  = touches the topic but argument is unclear, unsupported, OR mostly argues the wrong assigned side.
+- 3  = weak, off-topic, or contradictory; almost no reasoning. ALSO the maximum for a player who mostly argued the WRONG assigned side (see side-fidelity check).
+- 4  = touches the topic but argument is unclear or unsupported.
 - 5-6 = average — makes relevant points on their assigned side but lacks evidence or depth.
 - 7-8 = strong — clear reasoning on their assigned side plus at least one concrete example or piece of evidence; factually accurate.
 - 9-10 = excellent — well-structured, persuasive on their assigned side, multiple specific points, factually verified, no falsehoods.
