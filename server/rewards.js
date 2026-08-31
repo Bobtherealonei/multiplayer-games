@@ -124,6 +124,7 @@ async function processResult({
   reason,
   startedAt,
   friendly = false,
+  aiGame = false,
   skipDurationCheck = false,
   skipRewardsReason = null
 }) {
@@ -136,7 +137,13 @@ async function processResult({
   const todayKey = dayKey();
 
   const durationMs = Number(startedAt) > 0 ? Date.now() - Number(startedAt) : null;
-  const tooShort = !skipDurationCheck && durationMs !== null && durationMs < MIN_REWARDED_DEBATE_MS;
+  // AI games are exempt from the minimum-duration anti-farm rule: the AI
+  // answers in seconds instead of using a full turn timer, so a legitimate
+  // AI debate routinely finishes well under the human floor. Collusion isn't
+  // possible against the house AI, and a silent player still gets nothing
+  // via the no_speech path.
+  const tooShort = !skipDurationCheck && !aiGame &&
+    durationMs !== null && durationMs < MIN_REWARDED_DEBATE_MS;
 
   // Map outcome -> per-uid role.
   const isDraw = outcome.result === 'draw';
@@ -170,6 +177,7 @@ async function processResult({
         gameId,
         gameType: gameType || null,
         friendly,
+        aiGame,
         result: outcome.result,
         winnerId,
         loserId,
@@ -207,17 +215,22 @@ async function processResult({
       const role = roleByUid[uid];
       const recordField =
         role === 'win' ? 'debateWins' : role === 'loss' ? 'debateLosses' : 'debateDraws';
-      tx.set(
-        userRefs[i],
-        {
-          rankTokens: r.newRank,
-          sparkTokens: r.newSpark,
-          lastDebateDay: todayKey,
-          debatesToday: r.newDebatesToday,
-          [recordField]: FieldValue.increment(1)
-        },
-        { merge: true }
-      );
+      const userUpdate = {
+        rankTokens: r.newRank,
+        sparkTokens: r.newSpark,
+        lastDebateDay: todayKey,
+        debatesToday: r.newDebatesToday,
+        [recordField]: FieldValue.increment(1)
+      };
+      // AI matches count in the lifetime totals AND in a separate AI-only
+      // counter so the profile can break down AI vs. real-person records
+      // (real = total - ai).
+      if (aiGame && uid !== AI_OPPONENT_ID) {
+        const aiField =
+          role === 'win' ? 'aiDebateWins' : role === 'loss' ? 'aiDebateLosses' : 'aiDebateDraws';
+        userUpdate[aiField] = FieldValue.increment(1);
+      }
+      tx.set(userRefs[i], userUpdate, { merge: true });
       // Mirror the record + rank balance to the public profile so other
       // players can see them (users/{uid} is private; sparkTokens stay
       // private on purpose).
@@ -248,6 +261,7 @@ async function processResult({
       gameId,
       gameType: gameType || null,
       friendly,
+      aiGame,
       result: outcome.result,
       winnerId,
       loserId,
@@ -335,6 +349,7 @@ async function processForfeit(gameId, quitterId) {
       reason: judgedOutcome ? 'completed' : (silent ? 'forfeit_no_speech' : 'forfeit'),
       startedAt: state.startedAt,
       friendly: state.isFriendly === true || state.isFriendly === 'true',
+      aiGame: state.isAIGame === true || state.isAIGame === 'true',
       // Ranked forfeits still pay even under the 2-minute anti-farm window.
       skipDurationCheck: !judgedOutcome,
       skipRewardsReason: silent ? 'no_speech' : null
@@ -393,7 +408,8 @@ function makeRouter() {
         outcome,
         reason: 'completed',
         startedAt: state.startedAt,
-        friendly: state.isFriendly === true || state.isFriendly === 'true'
+        friendly: state.isFriendly === true || state.isFriendly === 'true',
+        aiGame: state.isAIGame === true || state.isAIGame === 'true'
       });
       // Return only the caller's view.
       const myBalances = summary.balances ? summary.balances[uid] : null;

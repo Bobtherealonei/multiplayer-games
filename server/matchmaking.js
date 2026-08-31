@@ -3,8 +3,26 @@
 // Topic debates: FIFO queue per category → random Support/Oppose → gameFound.
 
 const store = require('./gameStore');
+const { getDb } = require('./firestoreClient');
 
 function userRoom(userId) { return `user:${userId}`; }
+
+// Friend challenges from chat must never pay rank/spark rewards. Old app
+// builds don't send the `friendly` flag, and whoever queues last overwrites
+// the queue meta — so don't trust the clients. Public "Find a Debate" posts
+// always have a customDebates/{id} doc; chat challenges never do. No doc ⇒
+// friendly. Fails toward friendly (no rewards) if Firestore is unreachable.
+async function isFriendlyCustomDebate(customDebateId, options, existingMeta) {
+  if (options.friendly === true || existingMeta?.friendly === true) return true;
+  try {
+    const db = getDb();
+    if (!db) return true;
+    const snap = await db.collection('customDebates').doc(String(customDebateId)).get();
+    return !snap.exists;
+  } catch {
+    return true;
+  }
+}
 
 class Matchmaking {
   constructor(gameManager, io, lobbyManager) {
@@ -51,12 +69,14 @@ class Matchmaking {
         return;
       }
       const queueKey = `custom:${options.customDebateId}`;
+      const existingMeta = await store.getQueueMeta(queueKey);
       await store.setQueueMeta(queueKey, {
         customDebateId: options.customDebateId,
         question: options.question,
         topicTitle: options.topicTitle || 'Custom',
-        // Friend challenges from chat: spark-token rewards only, no trophies.
-        friendly: options.friendly === true
+        // Friend challenges from chat: no rewards. Server-derived — see
+        // isFriendlyCustomDebate for why the client flag alone isn't trusted.
+        friendly: await isFriendlyCustomDebate(options.customDebateId, options, existingMeta)
       });
       await store.enqueuePlayer(queueKey, userId);
       socket.emit('matchmakingStatus', { status: 'searching', gameType: 'custom' });
