@@ -44,6 +44,13 @@ const { pickNextQuestionForPair } = require('./questionPicker');
 // reconnect flow restores the clock mid-debate.
 const RECONNECT_GRACE_MS = 45000;
 
+// Live question pools an AI/philosopher debate can draw from ('custom' has no
+// pool of its own). Philosopher debates pick one of these at random.
+const AI_TOPIC_POOL = [...LIVE_GAME_TYPES].filter((t) => t !== 'custom');
+function pickRandomAITopicType() {
+  return AI_TOPIC_POOL[Math.floor(Math.random() * AI_TOPIC_POOL.length)];
+}
+
 function userRoom(userId) { return `user:${userId}`; }
 function gameRoom(gameId) { return `game:${gameId}`; }
 
@@ -245,18 +252,25 @@ class GameManager {
   // Support/Oppose selection screen can show it. The caller stashes the result
   // and passes it back via options.preview so the game uses this exact pick.
   async previewAIQuestion(humanId, gameType, philosopher = null) {
+    // Philosopher debates aren't tied to the category the client sent (older
+    // builds hardcode Trending in the USA) — draw from a random live pool so
+    // the topics vary game to game.
+    const pickType = philosopher && getPhilosopherPersona(philosopher)
+      ? pickRandomAITopicType()
+      : gameType;
     try {
-      const q = await pickNextQuestionForPair([humanId], gameType);
+      const q = await pickNextQuestionForPair([humanId], pickType);
       return {
         question: q.questionText,
         questionId: q.questionId || null,
         topicTitle: q.topicTitle || null,
         ammo: q.ammo || null,
+        categoryId: q.categoryId || pickType,
       };
     } catch (err) {
       if (philosopher && getPhilosopherPersona(philosopher)) {
         console.warn('[gameManager] philosopher preview pick failed, using fallback:', err.message);
-        return { question: pickPhilosophyQuestion(), questionId: null, topicTitle: null, ammo: null };
+        return { question: pickPhilosophyQuestion(), questionId: null, topicTitle: null, ammo: null, categoryId: gameType };
       }
       throw err;
     }
@@ -291,21 +305,26 @@ class GameManager {
 
     if (philosopher && philosopherPersona) {
       // Philosopher debates argue MODERN topics / current events, but in the
-      // philosopher's own voice. Pull a live trending question; fall back to a
-      // timeless one only if the pool is empty.
+      // philosopher's own voice. Pull a live question from a RANDOM category
+      // (not just the client-sent one, which older builds hardcode to
+      // Trending in the USA); fall back to a timeless one if the pool is empty.
       let questionText;
       let questionId = null;
       let questionAmmo = null;
+      let questionCategory = gameType;
       if (preview) {
         questionText = preview.question;
         questionId = preview.questionId || null;
         questionAmmo = preview.ammo || null;
+        questionCategory = preview.categoryId || gameType;
       } else {
+        const pickType = pickRandomAITopicType();
         try {
-          const q = await pickNextQuestionForPair([humanId], gameType);
+          const q = await pickNextQuestionForPair([humanId], pickType);
           questionText = q.questionText;
           questionId = q.questionId;
           questionAmmo = q.ammo || null;
+          questionCategory = q.categoryId || pickType;
         } catch (err) {
           console.warn('[gameManager] philosopher trending pick failed, using fallback:', err.message);
           questionText = pickPhilosophyQuestion();
@@ -315,7 +334,7 @@ class GameManager {
         question: questionText,
         questionId,
         topicTitle: philosopherPersona.displayName,
-        categoryId: gameType,
+        categoryId: questionCategory,
         positions: chosenPositions,
         ammo: questionAmmo,
       };
