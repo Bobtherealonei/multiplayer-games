@@ -153,7 +153,12 @@ async function processResult({
   const uids = Object.keys(roleByUid);
   if (uids.length !== 2) throw new Error('processResult needs exactly two players');
 
-  const userRefs = uids.map((uid) => db.collection('users').doc(uid));
+  // Firestore RESERVES doc IDs matching __*__, so the AI pseudo-player
+  // (__trendspark_ai_opponent__) can never have a users/ doc — even reading
+  // it throws INVALID_ARGUMENT and aborts the whole transaction. Only touch
+  // real players' docs.
+  const updateUids = uids.filter((uid) => uid !== AI_OPPONENT_ID);
+  const userRefs = updateUids.map((uid) => db.collection('users').doc(uid));
 
   // Friendly challenges, silent forfeits, and too-short judged debates
   // record a result for idempotence but never touch tokens or W/L.
@@ -195,22 +200,22 @@ async function processResult({
         winnerId,
         loserId,
         balances: null,
-        applied: Object.fromEntries(uids.map((uid) => [uid, { rank: 0, spark: 0 }]))
+        applied: Object.fromEntries(updateUids.map((uid) => [uid, { rank: 0, spark: 0 }]))
       };
     }
 
     const snaps = await Promise.all(userRefs.map((ref) => tx.get(ref)));
     const perUser = {};
-    for (let i = 0; i < uids.length; i++) {
-      const uid = uids[i];
+    for (let i = 0; i < updateUids.length; i++) {
+      const uid = updateUids[i];
       const current = defaultUserTokens(snaps[i].exists ? snaps[i].data() : {});
       perUser[uid] = computePlayerRewards(roleByUid[uid], current, todayKey, gameId);
     }
 
     // Apply balances + daily counters + lifetime W/L record (shown on the
     // profile as arguments won / lost).
-    for (let i = 0; i < uids.length; i++) {
-      const uid = uids[i];
+    for (let i = 0; i < updateUids.length; i++) {
+      const uid = updateUids[i];
       const r = perUser[uid];
       const role = roleByUid[uid];
       const recordField =
@@ -225,7 +230,7 @@ async function processResult({
       // AI matches count in the lifetime totals AND in a separate AI-only
       // counter so the profile can break down AI vs. real-person records
       // (real = total - ai).
-      if (aiGame && uid !== AI_OPPONENT_ID) {
+      if (aiGame) {
         const aiField =
           role === 'win' ? 'aiDebateWins' : role === 'loss' ? 'aiDebateLosses' : 'aiDebateDraws';
         userUpdate[aiField] = FieldValue.increment(1);
@@ -234,13 +239,11 @@ async function processResult({
       // Mirror the record + rank balance to the public profile so other
       // players can see them (users/{uid} is private; sparkTokens stay
       // private on purpose).
-      if (uid !== AI_OPPONENT_ID) {
-        tx.set(
-          db.collection('publicProfiles').doc(uid),
-          { [recordField]: FieldValue.increment(1), rankTokens: r.newRank },
-          { merge: true }
-        );
-      }
+      tx.set(
+        db.collection('publicProfiles').doc(uid),
+        { [recordField]: FieldValue.increment(1), rankTokens: r.newRank },
+        { merge: true }
+      );
       // One tokenHistory entry per change.
       for (const h of r.history) {
         const histRef = userRefs[i].collection('tokenHistory').doc();
@@ -275,10 +278,10 @@ async function processResult({
       winnerId,
       loserId,
       balances: Object.fromEntries(
-        uids.map((uid) => [uid, { rankTokens: perUser[uid].newRank, sparkTokens: perUser[uid].newSpark }])
+        updateUids.map((uid) => [uid, { rankTokens: perUser[uid].newRank, sparkTokens: perUser[uid].newSpark }])
       ),
       applied: Object.fromEntries(
-        uids.map((uid) => [uid, { rank: perUser[uid].rankApplied, spark: perUser[uid].sparkApplied }])
+        updateUids.map((uid) => [uid, { rank: perUser[uid].rankApplied, spark: perUser[uid].sparkApplied }])
       )
     };
   });
