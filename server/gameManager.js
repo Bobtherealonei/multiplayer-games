@@ -573,7 +573,13 @@ class GameManager {
     const aiSymbol = state.player1Id === AI_OPPONENT_ID ? state.player1Symbol : state.player2Symbol;
     const aiPosition = state.player1Id === AI_OPPONENT_ID ? state.player1Position : state.player2Position;
     const humanPosition = state.player1Id === playerId ? state.player1Position : state.player2Position;
-    const lastHuman = [...chatLog].reverse().find((entry) => entry.symbol !== aiSymbol);
+    // Everything the human said since the AI last spoke — a turn can hold
+    // several messages, and the AI must answer all of them, not just the last.
+    const lastAIIndex = chatLog.map((e) => e.symbol).lastIndexOf(aiSymbol);
+    const humanSinceAI = chatLog
+      .slice(lastAIIndex + 1)
+      .filter((entry) => entry.symbol !== aiSymbol && entry.text)
+      .map((entry) => entry.text);
 
     // Prefetched arguments for the AI's assigned side (from the data-collector
     // via the topic doc). Null-safe: older games / custom debates have none.
@@ -593,7 +599,8 @@ class GameManager {
         aiPosition,
         humanPosition,
         chatLog,
-        humanMessage: lastHuman?.text || '',
+        aiSymbol,
+        humanMessage: humanSinceAI.join('\n'),
         philosopher: state.philosopher || null,
         ammo: sideAmmo,
       });

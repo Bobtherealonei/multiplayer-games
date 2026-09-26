@@ -1,7 +1,10 @@
 // aiOpponent.js — fallback AI debate partner when matchmaking times out.
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
-const MODEL = 'gpt-4o-mini';
+// gpt-4.1-mini follows multi-rule prompts (answer the rebuttal first, never
+// repeat, stay on the statement) far more reliably than gpt-4o-mini, for a
+// few tenths of a cent more per debate.
+const MODEL = 'gpt-4.1-mini';
 
 const AI_OPPONENT_ID = '__trendspark_ai_opponent__';
 
@@ -37,9 +40,14 @@ const PHILOSOPHER_COMMON = [
   '- Never refuse a topic for being unfamiliar or anachronistic; a wise mind reasons about anything.',
   '- You may name the modern subject plainly, but interpret it with your own ideas and analogies.',
   '',
-  'ARGUE THE TOPIC:',
-  '- Every reply must advance YOUR case on the debate statement with a new idea, analogy, or reason — never merely react to the opponent\'s last message.',
-  '- Do not repeat an argument you already made earlier in the debate.',
+  'HOW TO DEBATE:',
+  '- FIRST answer the OPPONENT\'s latest argument directly: name their specific point and say why it is wrong, incomplete, or outweighed.',
+  '- THEN add at most one new idea, analogy, or reason for your side of the statement.',
+  '- If the opponent has refuted one of your earlier points and you have no real answer, let it go. Never bring back a point they already answered unless you add something new.',
+  '- Stay on the exact debate statement. Do not wander to a new sub-topic unless the opponent did.',
+  '- Do not repeat an argument you already made (check the lines marked YOU in the transcript). Rewording the same idea still counts as repeating — bring a different reason, example, or consequence each time.',
+  '- If the opponent half-concedes ("it is a risk, but...", "true, yet..."), seize on the concession and press it rather than restating your own point.',
+  '- Do not open with agree-then-pivot filler ("Indeed, yet...", "Ah, but...", "True, however...", "Yes, but..."). Begin directly with your answer to their point, and vary how you begin.',
   '',
   'LENGTH — VERY IMPORTANT:',
   '- Reply with 2 short sentences. Never more. This is a fast chat, not a lecture.',
@@ -137,18 +145,15 @@ function pickPhilosophyQuestion() {
   return PHILOSOPHY_QUESTIONS[Math.floor(Math.random() * PHILOSOPHY_QUESTIONS.length)];
 }
 
-const FALLBACK_REPLIES = {
-  support: [
-    'yeah i get that but i still think the upside is worth it. when you look at who this actually helps day to day the case for it is pretty clear tbh',
-    'ok fair but supporting this helps the people who actually need it. and honestly the downsides people bring up are way more manageable than they sound',
-    'nah i hear you but support still makes more sense here. the benefits compound over time and thats what people keep missing in this debate',
-  ],
-  oppose: [
-    'yeah but the risks here are way too big to ignore. once you go down this road its really hard to walk it back and thats what worries me',
-    'i mean maybe but opposing this is still the safer call. the people pushing for it always skip over who ends up paying the price',
-    'ok but i still think the oppose side is stronger on this. the supposed benefits are speculative while the costs are real and immediate',
-  ],
-};
+// Used only when OpenAI fails twice in a row. These deliberately make NO
+// argument — a canned "yeah but the risks are too big" line reads as
+// off-topic and repetitive (the #1 complaint in App Store reviews). Asking
+// the opponent to expand keeps the debate moving without faking a point.
+const FALLBACK_REPLIES = [
+  'hold on, walk me through that last point a bit more, what makes you so sure about it',
+  'ok say more on that, whats the strongest reason you have for it',
+  'interesting, but how does that actually play out in practice, give me a concrete case',
+];
 
 function stancePrompt(position) {
   if (position === 'support') {
@@ -160,9 +165,8 @@ function stancePrompt(position) {
   return 'Take a clear side and argue it persuasively.';
 }
 
-function pickFallback(position) {
-  const pool = FALLBACK_REPLIES[position] || FALLBACK_REPLIES.oppose;
-  return pool[Math.floor(Math.random() * pool.length)];
+function pickFallback() {
+  return FALLBACK_REPLIES[Math.floor(Math.random() * FALLBACK_REPLIES.length)];
 }
 
 /**
@@ -230,6 +234,9 @@ function casualizeReply(text) {
   // Drop stiff openers the model loves.
   s = s.replace(/^(however|furthermore|moreover|additionally|nevertheless),?\s+/i, '');
   s = s.replace(/^(i understand that|i appreciate that|it is important to note that)\s+/i, '');
+  // Safety net for the "yeah but" tic reviewers called out: strip a leading
+  // filler-agreement opener so the reply starts on the actual argument.
+  s = s.replace(/^(yeah|yea|ok|okay|nah|i mean|sure|fair|look|honestly),?\s+(but|still|though)\s+/i, '');
 
   // Lowercase start like most quick chat replies.
   if (s.length > 0) {
@@ -262,30 +269,38 @@ async function generateDebateReply({
   humanMessage,
   philosopher,
   ammo,
+  aiSymbol,
 }) {
   const apiKey = process.env.OPENAI_API_KEY;
   const philo = philosopher ? getPhilosopher(philosopher) : null;
   if (!apiKey) {
     // Philosophers have no canned fallback — return empty so we just stay quiet
     // rather than break character with a casual one-liner.
-    return philo ? '' : pickFallback(aiPosition);
+    return philo ? '' : pickFallback();
   }
 
+  // Label every line YOU / OPPONENT. Without this the model only saw raw
+  // symbols ("P1:", "P2:") and had to guess which arguments were its own —
+  // which is how it ended up repeating itself and re-raising points the
+  // human had already knocked down.
   const transcript = (chatLog || [])
-    .map((entry) => `${entry.symbol || '?'}: ${entry.text || ''}`)
+    .map((entry) => {
+      const who = aiSymbol && entry.symbol === aiSymbol ? 'YOU' : 'OPPONENT';
+      return `${who}: ${entry.text || ''}`;
+    })
     .join('\n')
     .trim();
 
   // Prefetched arguments for the AI's side, generated alongside the topic
-  // from the source news story. Paraphrase-one-per-turn keeps it sounding
-  // human instead of like a briefing doc.
+  // from the source news story. OPTIONAL now: forcing one fact per turn made
+  // the AI steer every reply toward whatever fact was left, regardless of
+  // what the human had just argued — reviewers read that as "off-topic".
   const hasAmmo = Array.isArray(ammo) && ammo.length > 0;
   const ammoBlock = hasAmmo
     ? [
-        'FACTS for your side (from the news story behind this topic — you MUST use these):',
+        'FACTS you may draw on (from the news story behind this topic):',
         ...ammo.map((p) => `- ${p}`),
-        'REQUIRED: each reply must weave in ONE concrete fact from the list above (a number, name, program, or specific claim). Rephrase it in casual chat voice — never quote verbatim, never list bullets — but the fact must be recognizable.',
-        'Pick a different unused fact each turn when possible; do not repeat the same fact twice in one debate.',
+        'Use a fact ONLY when it directly supports the point you are making in this reply — never steer the conversation just to fit one in. Rephrase in casual chat voice, never quote verbatim, never list bullets. Do not reuse a fact you already used.',
       ].join('\n')
     : '';
 
@@ -307,73 +322,95 @@ async function generateDebateReply({
         `Statement under debate: ${question}`,
         humanPosition ? `They are on the ${humanPosition} side.` : '',
         ammoBlock,
-        hasAmmo
-          ? 'EVERY reply must ADVANCE YOUR CASE with one of the facts above plus a brief reaction to them if needed.'
-          : 'EVERY reply must ADVANCE YOUR OWN CASE on the statement — bring a concrete reason, example, consequence, or fact about the TOPIC itself. Do not just react to what they said.',
-        'If they made a point, briefly push back on it, then pivot to your own new argument. If their message is weak or off-topic, mostly make your own point.',
-        'Never repeat an argument you already used earlier in the debate — each turn adds something NEW.',
-        'Reply in 1-2 sentences (~15-30 words). Punchy and quick — this is chat, not an essay.',
-        'Write like real chat: casual, plain words, imperfect grammar is fine.',
-        'Use normal talk: yeah, nah, ok, i mean, honestly, like, but, still, tbh.',
+        '',
+        'HOW TO DEBATE (in this order, every reply):',
+        '1. FIRST, directly answer the OPPONENT\'s latest argument. Name their specific point and say why it is wrong, incomplete, or outweighed. If they gave an example, deal with THAT example.',
+        '2. THEN add at most ONE new reason, example, or consequence that supports your side of the statement.',
+        'If the opponent has refuted one of your earlier points and you have no real answer, drop it. Never bring back a point they already answered unless you add new evidence.',
+        'Stay on the exact debate statement. Do not switch to a new sub-topic unless the opponent did. Follow the thread of the conversation, not a script.',
+        'Never repeat an argument YOU already made — check the lines marked YOU above. Saying the same idea in new words still counts as repeating. Every reply must bring a genuinely different angle: a different reason, a specific example, a consequence, or a comparison you have not used yet.',
+        'If the opponent half-concedes ("its a risk but...", "sure but...", "fine but..."), call out the concession and push on it instead of restating your point.',
+        'Reply in 1-2 sentences (~20-35 words). Punchy and quick — this is chat, not an essay.',
+        'Write like real chat: casual, plain words, imperfect grammar is fine. Contractions always (dont, cant, im, youre, its). Lowercase is fine.',
+        'Never open with "yeah but", "ok but", "i mean", "nah", "fair but" or any agree-then-pivot filler. Start straight in on the argument. Vary how you open.',
         'Skip fancy words (nevertheless, furthermore, consequently, utilize, individuals).',
         'Do NOT use perfect punctuation. Often skip periods. No semicolons or em dashes.',
-        'Lowercase is fine. Contractions always (dont, cant, im, youre, its).',
         'No lists, no essay tone, no "As a supporter I believe". Just talk back.',
         'Never mention being an AI.',
       ]
         .filter(Boolean)
         .join('\n');
 
+  const theirLatest = (humanMessage || '').trim();
   const userContent = transcript
-    ? `Debate so far:\n${transcript}\n\nIt's your turn. Their latest message was: "${humanMessage || ''}". Push your ${aiPosition || 'own'} case forward with a NEW argument about the statement itself (1-2 sentences) — respond to their point only briefly if it deserves it.`
+    ? [
+        `Debate so far (YOU = your messages, OPPONENT = theirs):\n${transcript}`,
+        theirLatest
+          ? `\nThe opponent's message(s) since you last spoke:\n"${theirLatest}"`
+          : '\nThe opponent said nothing since you last spoke.',
+        `\nIt's your turn. Answer their latest point head-on first, then push your ${aiPosition || 'own'} case with ONE new argument about the statement itself (1-2 sentences). Do not repeat anything from your YOU lines.`,
+      ].join('\n')
     : philo
     ? `Open the debate on this modern statement in 2 sentences, in your own voice: "${question}"`
     : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the statement (1-2 sentences).`;
 
-  try {
-    const resp = await fetch(OPENAI_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        temperature: philo ? 0.8 : 0.9,
-        // Generous headroom on purpose: reply LENGTH is controlled by the
-        // prompt + the 2-sentence trim below. A tight cap here made OpenAI
-        // hard-truncate replies mid-sentence (finish_reason 'length').
-        max_tokens: philo ? 220 : 160,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: userContent },
-        ],
-      }),
-    });
+  const request = {
+    model: MODEL,
+    temperature: philo ? 0.8 : 0.8,
+    // Generous headroom on purpose: reply LENGTH is controlled by the
+    // prompt + the 2-sentence trim below. A tight cap here made OpenAI
+    // hard-truncate replies mid-sentence (finish_reason 'length').
+    max_tokens: philo ? 220 : 160,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userContent },
+    ],
+  };
 
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      console.error(`[aiOpponent] OpenAI ${resp.status}: ${errText.slice(0, 200)}`);
-      return philo ? '' : pickFallback(aiPosition);
+  // One retry before the fallback: a transient 429/5xx should not turn a
+  // debate turn into a canned line.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const text = await callOpenAI(apiKey, request);
+      if (!text) continue;
+      // Philosophers keep their eloquent voice — don't casualize them, but hard
+      // cap at 2 sentences so replies stay chat-sized.
+      if (philo) return trimToSentences(text, 2);
+      const casual = casualizeReply(text);
+      if (casual) return casual;
+    } catch (err) {
+      console.error(`[aiOpponent] attempt ${attempt} failed: ${err.message}`);
     }
-
-    const data = await resp.json();
-    const choice = data?.choices?.[0];
-    let text = choice?.message?.content?.trim();
-    if (!text) return philo ? '' : pickFallback(aiPosition);
-    // Safety net: if the model still hit the token cap, remove the
-    // incomplete trailing sentence instead of showing a mid-sentence cutoff.
-    if (choice?.finish_reason === 'length') {
-      text = dropTruncatedTail(text);
-    }
-    // Philosophers keep their eloquent voice — don't casualize them, but hard
-    // cap at 2 sentences so replies stay chat-sized.
-    if (philo) return trimToSentences(text, 2);
-    return casualizeReply(text) || pickFallback(aiPosition);
-  } catch (err) {
-    console.error('[aiOpponent] generateDebateReply failed:', err.message);
-    return philo ? '' : pickFallback(aiPosition);
   }
+  console.error('[aiOpponent] both attempts failed — using neutral fallback');
+  return philo ? '' : pickFallback();
+}
+
+async function callOpenAI(apiKey, request) {
+  const resp = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`OpenAI ${resp.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const data = await resp.json();
+  const choice = data?.choices?.[0];
+  let text = choice?.message?.content?.trim();
+  if (!text) return '';
+  // Safety net: if the model still hit the token cap, remove the
+  // incomplete trailing sentence instead of showing a mid-sentence cutoff.
+  if (choice?.finish_reason === 'length') {
+    text = dropTruncatedTail(text);
+  }
+  return text;
 }
 
 module.exports = {

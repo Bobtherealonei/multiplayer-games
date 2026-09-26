@@ -41,11 +41,15 @@ const {
 const PERPLEXITY_URL = 'https://api.perplexity.ai/chat/completions';
 const PERPLEXITY_MODEL = 'sonar';
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
-const OPENAI_MODEL = 'gpt-4o-mini';
+// One judge call per debate decides who wins trophies — worth a full-size
+// model (~$0.004/debate on gpt-4.1 vs ~$0.0003 on gpt-4o-mini). The mini
+// model over-rewarded whichever side quoted more facts, which in AI games
+// is always the AI (it is handed news facts every turn).
+const OPENAI_MODEL = 'gpt-4.1';
 
 // Scores + a 2-4 sentence review fit comfortably in 300 tokens; the old 500
 // cap just paid for prose nobody reads.
-const JUDGE_MAX_TOKENS = 300;
+const JUDGE_MAX_TOKENS = 520;
 
 function stanceDescription(position) {
   if (position === 'support') {
@@ -91,7 +95,7 @@ No Support/Oppose assignments were recorded for this debate. Score each player o
     '- Merely QUOTING or rebutting the opponent\'s side does not count as arguing the wrong side — only their own affirmative case matters.',
     '',
     'Also when scoring:',
-    '- Reward clear, relevant arguments that advance their ASSIGNED side with reasoning and evidence.',
+    '- Reward clear, relevant arguments that advance their ASSIGNED side with reasoning, examples, and evidence.',
     '- Penalize ignoring the question entirely or only personal attacks (existing caps still apply).',
     '- Do NOT score based on whether you personally agree with their side — only on how well they argued the side they were assigned.',
   );
@@ -106,7 +110,7 @@ function buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb) {
   const sideBlock = buildSideInstructions(nameX, nameO, stances);
 
   const factLine = hasWeb
-    ? 'You have access to the live web — use it to spot-check any factual claims.'
+    ? 'You have access to the live web. Use it ONLY to check specific factual claims a player actually made (a number, a date, an event, a law). Do NOT research the debate topic itself, and never give a player credit because your research agrees with their side — that is taking sides, which is forbidden.'
     : 'You do NOT have web access. Judge argument quality, clarity, relevance, and reasoning. Penalize claims that are clearly false by well-established common knowledge, but do NOT guess about very recent events you cannot verify — score those on reasoning alone.';
 
   const falseClaimCap = hasWeb
@@ -116,28 +120,53 @@ function buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb) {
   return `You are an impartial AI debate judge. Two players just had a short debate: ${nameX} and ${nameO}. Today is ${todayHuman}. ${factLine}
 ${sideBlock}
 
+FORMAT OF THIS DEBATE
+- Players alternate turns. Each turn is a chat message typed under a clock of roughly 45 seconds, so messages are short (often one or two sentences).
+- Judge depth RELATIVE to that format. A short message that makes a clear, relevant, well-reasoned point is a strong message. Do not penalize brevity itself, and do not expect essay-length development.
+
 In your scoring output:
 - "ScoreX" is ${nameX}'s score.
 - "ScoreO" is ${nameO}'s score.
 In your written review, refer to the players by name (${nameX} and ${nameO}). Do NOT call them "Player X", "Player O", "Player 1", or "Player 2".
 
 YOUR TASK
-1. Read the full transcript carefully.
+1. Read the full transcript carefully, in order, tracking how each message responds to the one before it.
 2. Run the side-fidelity check above (when sides are assigned): confirm each player argued their ASSIGNED side, and apply the wrong-side cap if they didn't.
-3. Score each player independently from 0 to 10 using the scale below.
-4. Write a 2-4 sentence review explaining the scores using the players' names. Quote or paraphrase the strongest specific argument from each side that actually contributed. If a player was silent, hostile, or argued the wrong side, say so plainly. Do not share your personal opinion on the topic.
+3. For EACH player, list their DISTINCT arguments. Saying the same idea again in different words is the SAME argument, not a new one — merge rephrasings. Also note which of the opponent's arguments they actually answered. Apply exactly the same standard to both players.
+4. Score each player independently from 0 to 10 using the scale below, based on the lists from step 3.
+5. Write a 2-4 sentence review explaining the scores using the players' names. Quote or paraphrase the strongest specific argument from each side, AND name the strongest rebuttal each side made (or say plainly that they made none). If one player repeated themselves, check whether the other did too and say so. If a player was silent, hostile, or argued the wrong side, say so plainly. Do not share your personal opinion on the topic.
+
+FAIRNESS RULES
+- Polished or formal wording is NOT a stronger argument. Casual language, slang, lowercase, typos, and blunt phrasing must never lower a score. Judge the idea, not the prose.
+- Repetition is judged identically for both sides. A player who restates one point in smoother words every turn is repeating just as much as a player who restates it bluntly.
+- If both players made a similar number of distinct arguments and engaged the opponent a similar amount, their scores must be within 1 point of each other.
+- When the debate statement is a "should" / policy / value question and neither side made a specific false factual claim, factual accuracy is a NON-factor. Do not give a side credit because their view "matches reality" or "reflects how things work" — that is agreeing with them, which is forbidden.
+- A short partial concession followed by a new angle (e.g. "that is a risk, but it is a necessary one because...") IS engagement and IS a new argument. Credit it.
 
 You do NOT pick the winner. The application code will compare the two scores numerically — your only job is to set them honestly.
+
+WHAT COUNTS (weigh these roughly equally)
+- REASONING: clear logic that actually supports their side of the statement.
+- CLASH: directly answering the opponent's arguments. Engaging with the opponent's specific point — refuting it, conceding it, or showing why it is outweighed — is worth as much as introducing a new point. Ignoring the opponent's arguments is a weakness.
+- SUPPORT: examples, evidence, and consequences. A specific real-world example, a concrete scenario, or a sound causal argument counts as support just as much as a statistic. A quoted number is NOT automatically stronger than good reasoning, and an unsourced statistic earns no extra credit over a well-explained example.
+- RELEVANCE: staying on the exact debate statement.
+- CLARITY and civility.
+
+PENALIZE (lower the score of the player who does this)
+- Ignoring a direct rebuttal and simply moving on to a new talking point.
+- Repeating an argument the opponent has already answered, without adding anything new. Repetition is not persistence; it is a failure to respond.
+- Drifting away from the debate statement onto side topics the opponent did not raise.
+- Stacking facts or figures that do not connect to the point actually under discussion.
 
 SCORING SCALE (apply STRICTLY — do not inflate scores out of politeness)
 - 0  = did not participate at all (no messages, or only whitespace).
 - 1  = only sent gibberish, spam, or a single useless message.
 - 2  = ONLY insults, profanity, slurs, hate speech, or trolling. No actual argument.
 - 3  = weak, off-topic, or contradictory; almost no reasoning. ALSO the maximum for a player who mostly argued the WRONG assigned side (see side-fidelity check).
-- 4  = touches the topic but argument is unclear or unsupported.
-- 5-6 = average — makes relevant points on their assigned side but lacks evidence or depth.
-- 7-8 = strong — clear reasoning on their assigned side plus at least one concrete example or piece of evidence; factually accurate.
-- 9-10 = excellent — well-structured, persuasive on their assigned side, multiple specific points, factually verified, no falsehoods.
+- 4  = touches the topic but argument is unclear, unsupported, OR mostly repeats points the opponent already answered.
+- 5-6 = average — makes relevant points on their assigned side but does not really engage the opponent's arguments, or offers little support for their own.
+- 7-8 = strong — clear reasoning on their assigned side, directly answers the opponent's main points, and gives at least one concrete example, scenario, or piece of evidence; factually accurate.
+- 9-10 = excellent — persuasive on their assigned side, answers every significant rebuttal, multiple specific well-connected points, no falsehoods.
 
 ANY of these caps a player at 2 OR LOWER, regardless of length:
 - Insults, profanity, slurs, or hate speech with no actual argument.
@@ -149,9 +178,12 @@ DO NOT
 - Do not adjust scores so they come out equal or unequal — score each player on their own merits, ignoring what the other got.
 - Do not score insults or trolling as if they were arguments.
 - Do not soften the score of a hostile or silent player. Reflect what actually happened.
+- Do not favor the player who used more numbers or named more facts if those facts did not answer what the other player actually argued.
 - Do not write "winner" or "tie" anywhere in your output. The code decides that.
 
 Return EXACTLY this format (no markdown, no extra prose, no JSON):
+PointsX: <number of distinct arguments ${nameX} made>; <number of ${nameO}'s arguments ${nameX} answered>; <one line listing ${nameX}'s distinct arguments>
+PointsO: <number of distinct arguments ${nameO} made>; <number of ${nameX}'s arguments ${nameO} answered>; <one line listing ${nameO}'s distinct arguments>
 ScoreX: <integer 0-10>
 ScoreO: <integer 0-10>
 Review: <2-4 sentences>`;
@@ -172,6 +204,14 @@ function parseJudgeReply(content) {
   const scoreX = parseScore(findLine('scorex:'));
   const scoreO = parseScore(findLine('scoreo:'));
   const review = findLine('review:') || (content || '').trim();
+
+  // The Points lines are the judge's working notes (distinct arguments per
+  // side). They never reach the client; log them so fairness can be audited.
+  const pointsX = findLine('pointsx:');
+  const pointsO = findLine('pointso:');
+  if (pointsX || pointsO) {
+    console.log(`[judge] PointsX: ${pointsX}\n[judge] PointsO: ${pointsO}`);
+  }
 
   // Winner is computed from the scores deterministically — the model is not
   // allowed to decide it. Pure number comparison: higher score wins, equal = tie.
@@ -492,6 +532,45 @@ async function runJudge({ mode, recency, topic, question, safeMessages, names, s
   throw lastErr;
 }
 
+// ── AI-game handicap ───────────────────────────────────────────────────────
+// Human-vs-AI debates are tilted slightly toward the human: the AI is built
+// to rebut every message, so a fair judge hands it most close calls, which
+// makes a new player's first debates feel unwinnable. After judging, the
+// human gets a small bonus and wins ties. Human-vs-human games are untouched.
+// Tunable via env so it can be dialled down as the player base grows:
+//   AI_GAME_HUMAN_BONUS   integer added to the human's score (default 1)
+//   AI_GAME_TIE_TO_HUMAN  'false' to let ties stand (default: human wins ties)
+const AI_GAME_HUMAN_BONUS = Math.max(0, parseInt(process.env.AI_GAME_HUMAN_BONUS ?? '1', 10) || 0);
+const AI_GAME_TIE_TO_HUMAN = process.env.AI_GAME_TIE_TO_HUMAN !== 'false';
+// Below this raw score the human was silent, trolling, or hostile (the
+// prompt caps those at 2) — no bonus for that.
+const HANDICAP_MIN_HUMAN_SCORE = 3;
+
+function applyAIGameHandicap(result, state) {
+  if (!result || !state) return result;
+  const humanSymbol = state.player1Id === AI_OPPONENT_ID ? 'O'
+    : state.player2Id === AI_OPPONENT_ID ? 'X'
+    : null;
+  if (!humanSymbol) return result;
+
+  const humanKey = humanSymbol === 'X' ? 'scoreX' : 'scoreO';
+  const aiKey = humanSymbol === 'X' ? 'scoreO' : 'scoreX';
+  const rawHuman = result[humanKey];
+  if (typeof rawHuman !== 'number' || rawHuman < HANDICAP_MIN_HUMAN_SCORE) return result;
+
+  const human = Math.min(10, rawHuman + AI_GAME_HUMAN_BONUS);
+  const rawAI = typeof result[aiKey] === 'number' ? result[aiKey] : 0;
+  // Ties go to the human; drop the AI a point so the displayed scores agree
+  // with the "you won" banner instead of showing 6–6 next to a win.
+  const ai = (human === rawAI && AI_GAME_TIE_TO_HUMAN) ? Math.max(0, rawAI - 1) : rawAI;
+  const winner = human > ai ? humanSymbol : ai > human ? (humanSymbol === 'X' ? 'O' : 'X') : 'tie';
+
+  if (human !== rawHuman || ai !== rawAI || winner !== result.winner) {
+    console.log(`[judge] AI-game handicap: human ${rawHuman}->${human}, ai ${rawAI}->${ai}, winner ${result.winner}->${winner}`);
+  }
+  return { ...result, [humanKey]: human, [aiKey]: ai, winner };
+}
+
 function makeRouter() {
   const router = express.Router();
 
@@ -549,7 +628,7 @@ function makeRouter() {
     // possible). This branch is mostly for safety — iOS always sends one.
     if (!hasGameId) {
       try {
-        const result = await runJudge(judgeArgs);
+        const result = applyAIGameHandicap(await runJudge(judgeArgs), state);
         return res.json(result);
       } catch (err) {
         const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
@@ -566,7 +645,7 @@ function makeRouter() {
     const gotLock = await store.tryAcquireJudgeLock(gameId);
     if (gotLock) {
       try {
-        const result = await runJudge(judgeArgs);
+        const result = applyAIGameHandicap(await runJudge(judgeArgs), state);
         await store.setJudgeResult(gameId, result);
         return res.json(result);
       } catch (err) {

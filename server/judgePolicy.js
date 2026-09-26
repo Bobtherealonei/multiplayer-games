@@ -60,14 +60,18 @@ const STRONG_FACT_PATTERNS = [
   /\b(?:according to|study|studies|research(?:ers)? (?:show|shows|found|says)|statistic(?:s)?|survey|poll(?:s|ing)?|data (?:shows?|says?)|report(?:ed|s)? (?:that|by)|sources? say)\b/i,
 ];
 
-// CURRENT-EVENTS signals: claims about who holds power, what just happened,
-// what is legal, who won — checkable against today's web even with no digits.
+// CURRENT-EVENTS signals: claims about what just happened, what is legal,
+// who won — checkable against today's web even with no digits.
 // Only applied on news-backed topics, where such claims are the norm.
+//
+// Deliberately NOT included: bare nouns like "president", "congress",
+// "tariffs", or politicians' names. In a debate about presidents and
+// tariffs every message contains those words without making any checkable
+// claim, and routing such opinion debates to the web-search judge made it
+// research the topic itself and reward the side it agreed with.
 const CURRENT_EVENTS_PATTERNS = [
-  /\b(?:president|prime minister|chancellor|congress|senate|supreme court|white house|parliament|governor|federal reserve)\b/i,
-  /\b(?:trump|biden|harris|putin|zelensky|netanyahu|xi jinping|musk)\b/i,
   /\b(?:signed|passed|vetoed|repealed)\s+(?:a\s|an\s|the\s)?(?:law|bill|order|ban|treaty|deal)\b/i,
-  /\b(?:banned|outlawed|legalized|made illegal|now legal|new law|executive order|tariffs?|sanctions?)\b/i,
+  /\b(?:banned|outlawed|legalized|made illegal|now legal|new law|executive order)\b/i,
   /\b(?:was|got|been)\s+(?:elected|arrested|convicted|impeached|indicted|fired|traded|suspended)\b/i,
   /\b(?:won|lost)\s+the\s+(?:election|war|game|series|title|championship|finals?|cup)\b/i,
   /\b(?:died|passed away|resigned|stepped down|retired from|signed with)\b/i,
