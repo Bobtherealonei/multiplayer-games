@@ -42,7 +42,9 @@ const { pickNextQuestionForPair } = require('./questionPicker');
 // the game counts it as a forfeit. Generous on purpose: the debate clock keeps
 // running while they're away, so missed turns already cost them — and the
 // reconnect flow restores the clock mid-debate.
-const RECONNECT_GRACE_MS = 45000;
+// 60s (was 45s): the most common real drop is the iPhone auto-locking while
+// a player reads and thinks (30s default) — this gives them time to unlock.
+const RECONNECT_GRACE_MS = 60000;
 
 // Live question pools an AI/philosopher debate can draw from ('custom' has no
 // pool of its own). Philosopher debates pick one of these at random.
@@ -786,7 +788,11 @@ class GameManager {
       return;
     }
 
-    this.io.to(gameRoom(gameId)).emit('playerLeft', { message, gameId });
+    // `kind` lets newer clients say "your opponent left" instead of
+    // "disconnected" for a deliberate quit. `message` must stay exactly
+    // 'Player has disconnected' for the default case: shipped clients only
+    // show their exit alert when the text matches that string verbatim.
+    this.io.to(gameRoom(gameId)).emit('playerLeft', { message, gameId, kind: 'left' });
     await this.endGame(gameId);
   }
 
@@ -870,7 +876,8 @@ class GameManager {
         if (otherId) {
           this.io.to(userRoom(otherId)).emit('opponentDisconnected', {
             message: 'Player has disconnected',
-            gameId
+            gameId,
+            kind: 'disconnected'
           });
         }
 
