@@ -11,6 +11,8 @@
 //   queue:{gameType}             ZSET   matchmaking queue, score = joinedAt
 //   judge:{gameId}               STRING JSON judge result (TTL ~10 min)
 //   judge-lock:{gameId}          STRING single-flight lock (TTL ~60s)
+//   disconnect:{userId}          STRING JSON { gameId, at } — last mid-game drop (TTL 10 min)
+//   ended-notice:{userId}        STRING JSON — "your game ended while away" (TTL 10 min)
 //
 // Game hash fields are written/read as JSON so we can cheaply round-trip
 // nested objects (matchRequests, etc.) without inventing a per-field schema.
@@ -139,6 +141,80 @@ async function clearPlayerGame(userId) {
 
 async function isPlayerInGame(userId) {
   return Boolean(await getPlayerGame(userId));
+}
+
+// ── Disconnect tracking (cluster-safe reconnect grace) ──────────────────
+//
+//   disconnect:{userId}    STRING JSON { gameId, at }   TTL 10 min
+//
+// Written when a socket for a mid-game user drops, deleted when ANY socket
+// for that user reattaches. The grace timer is a local setTimeout on the
+// instance that saw the drop; a reconnect that lands on a different
+// instance can't cancel it. So when a timer fires it reads this key and
+// only forfeits if the user's MOST RECENT drop is at least the grace period
+// old — otherwise it re-arms for the remainder. Without this, a player whose
+// connection flaps across instances gets forfeited on a stale countdown.
+const DISCONNECT_TTL_SECONDS = 10 * 60;
+
+async function markPlayerDisconnected(userId, gameId, at = Date.now()) {
+  if (!userId || !gameId) return;
+  await client.set(
+    `disconnect:${userId}`,
+    JSON.stringify({ gameId, at }),
+    'EX',
+    DISCONNECT_TTL_SECONDS
+  );
+}
+
+async function getPlayerDisconnect(userId) {
+  if (!userId) return null;
+  const raw = await client.get(`disconnect:${userId}`);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed.at === 'number' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function clearPlayerDisconnect(userId) {
+  if (!userId) return;
+  await client.del(`disconnect:${userId}`);
+}
+
+// ── "Your game ended while you were away" notice ─────────────────────────
+//
+//   ended-notice:{userId}  STRING JSON { gameId, reason, kind, message, at }  TTL 10 min
+//
+// Set when a game ends for a player who has no live socket (forfeited by
+// the grace timer, or their opponent quit while they were backgrounded).
+// Consumed on their next connection so the client can leave the dead
+// debate screen instead of sitting in it alone.
+const ENDED_NOTICE_TTL_SECONDS = 10 * 60;
+
+async function setEndedNotice(userId, notice) {
+  if (!userId || !notice || !notice.gameId) return;
+  await client.set(
+    `ended-notice:${userId}`,
+    JSON.stringify({ ...notice, at: Date.now() }),
+    'EX',
+    ENDED_NOTICE_TTL_SECONDS
+  );
+}
+
+// Read-and-delete: a notice is delivered at most once.
+async function takeEndedNotice(userId) {
+  if (!userId) return null;
+  const k = `ended-notice:${userId}`;
+  const raw = await client.get(k);
+  if (!raw) return null;
+  await client.del(k);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 // ── Matchmaking queue ───────────────────────────────────────────────────
@@ -571,6 +647,12 @@ module.exports = {
   getPlayerGame,
   clearPlayerGame,
   isPlayerInGame,
+  // disconnect grace / ended notices
+  markPlayerDisconnected,
+  getPlayerDisconnect,
+  clearPlayerDisconnect,
+  setEndedNotice,
+  takeEndedNotice,
   // matchmaking
   enqueuePlayer,
   removeFromAllQueues,

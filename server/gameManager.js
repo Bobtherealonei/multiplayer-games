@@ -414,7 +414,7 @@ class GameManager {
   // debate conversations after the fact — Redis state (including chatLog)
   // is deleted a moment later in endGame(). Upserts `debates/{gameId}` so
   // this works whether or not `_writeDebateDocument` already created it.
-  async _persistDebateTranscript(gameId, state) {
+  async _persistDebateTranscript(gameId, state, endMeta = null) {
     const db = getDb();
     if (!db || !state) return;
     try {
@@ -423,6 +423,8 @@ class GameManager {
       const chatLog = Array.isArray(state.chatLog) ? state.chatLog : [];
       await db.collection('debates').doc(gameId).set(
         {
+          ...(endMeta && endMeta.endReason ? { endReason: endMeta.endReason } : {}),
+          ...(endMeta && endMeta.endedBy ? { endedBy: endMeta.endedBy } : {}),
           gameId,
           gameType: state.gameType || null,
           categoryId: state.gameType || null,
@@ -688,18 +690,24 @@ class GameManager {
   // Tear down a game everywhere: Redis state, room membership, pending
   // disconnect timers on THIS instance. Cross-instance pending timers
   // self-heal — when they fire, they'll see no game in Redis and bail.
-  async endGame(gameId) {
+  // `endMeta` (optional) is written to the debates/{gameId} transcript doc so
+  // the admin panel can show HOW a debate ended:
+  //   { endReason: 'forfeit_left' | 'forfeit_disconnect' | ..., endedBy: userId }
+  async endGame(gameId, endMeta = null) {
     const state = await store.loadGameState(gameId);
     if (!state) return;
     const { player1Id, player2Id } = state;
 
-    await this._persistDebateTranscript(gameId, state);
+    await this._persistDebateTranscript(gameId, state, endMeta);
 
     for (const uid of [player1Id, player2Id]) {
       const t = this.pendingDisconnects.get(uid);
       if (t) {
         clearTimeout(t);
         this.pendingDisconnects.delete(uid);
+      }
+      if (uid && uid !== AI_OPPONENT_ID) {
+        await store.clearPlayerDisconnect(uid).catch(() => {});
       }
     }
 
@@ -762,9 +770,31 @@ class GameManager {
     // judge verdict already exists, processForfeit finalizes THAT outcome
     // instead — leaving the results screen never flips a win to a loss.)
     try {
-      await rewards.processForfeit(gameId, playerId);
+      await rewards.processForfeit(gameId, playerId, { cause: 'left' });
     } catch (err) {
       console.error('[gameManager] forfeit (leave) failed:', err.message);
+    }
+
+    // If the opponent is offline right now (backgrounded, mid-reconnect),
+    // the `playerLeft` below never reaches them and they'd come back to a
+    // debate that no longer exists. Leave a notice for their next connection.
+    const leftBehindId = state
+      ? (state.player1Id === playerId ? state.player2Id : state.player1Id)
+      : null;
+    if (leftBehindId && leftBehindId !== AI_OPPONENT_ID) {
+      try {
+        const live = await this.io.in(userRoom(leftBehindId)).fetchSockets();
+        if (live.length === 0) {
+          await store.setEndedNotice(leftBehindId, {
+            gameId,
+            reason: 'opponent_left',
+            kind: 'left',
+            message: 'Your opponent left the debate.'
+          });
+        }
+      } catch (err) {
+        console.error('[gameManager] ended-notice (leave) failed:', err.message);
+      }
     }
 
     // Debate already judged? The game only exists so players can read their
@@ -793,7 +823,7 @@ class GameManager {
     // 'Player has disconnected' for the default case: shipped clients only
     // show their exit alert when the text matches that string verbatim.
     this.io.to(gameRoom(gameId)).emit('playerLeft', { message, gameId, kind: 'left' });
-    await this.endGame(gameId);
+    await this.endGame(gameId, { endReason: 'forfeit_left', endedBy: playerId });
   }
 
   // Player tapped Pass after the debate — notify the opponent and tear down the room.
@@ -841,60 +871,139 @@ class GameManager {
     const gameId = await store.getPlayerGame(playerId);
     if (!gameId) return;
 
+    // Record the drop cluster-wide so whichever instance's timer fires can
+    // measure the grace from the user's MOST RECENT drop (see gameStore).
+    // Best-effort: if Redis hiccups we fall back to the local timer alone.
+    let marked = true;
+    try {
+      await store.markPlayerDisconnected(playerId, gameId);
+    } catch (err) {
+      marked = false;
+      console.error('[gameManager] markPlayerDisconnected failed:', err.message);
+    }
+
+    this._armDisconnectTimer(playerId, gameId, RECONNECT_GRACE_MS, { marked });
+  }
+
+  // (Re)arm the local grace timer for a player. Replaces any existing one.
+  _armDisconnectTimer(playerId, gameId, delayMs, { marked = true } = {}) {
     const existing = this.pendingDisconnects.get(playerId);
     if (existing) clearTimeout(existing);
 
-    const handle = setTimeout(async () => {
+    const handle = setTimeout(() => {
       this.pendingDisconnects.delete(playerId);
-      try {
-        // If the game has already been torn down (peer hit Leave, TTL
-        // expiry, etc.), nothing to do.
-        const state = await store.loadGameState(gameId);
-        if (!state) return;
-
-        const game = this._hydrate(state);
-        const sym = game?.symbolFor?.(playerId);
-        if (sym && game.matchRequests?.[sym] === false) {
-          await this.handlePassMatch(playerId, gameId);
-          return;
-        }
-
-        // Cross-instance reconnection check. If the user has any live
-        // socket anywhere in the cluster, treat them as reconnected.
-        const sockets = await this.io.in(userRoom(playerId)).fetchSockets();
-        if (sockets.length > 0) return;
-
-        // Treat a real disconnect (no reconnection within the grace window)
-        // of a started debate as a forfeit. Idempotent via debateResults.
-        try {
-          await rewards.processForfeit(gameId, playerId);
-        } catch (err) {
-          console.error('[gameManager] forfeit (disconnect) failed:', err.message);
-        }
-
-        const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
-        if (otherId) {
-          this.io.to(userRoom(otherId)).emit('opponentDisconnected', {
-            message: 'Player has disconnected',
-            gameId,
-            kind: 'disconnected'
-          });
-        }
-
-        // Post-judging, a disconnect only removes that player — the other
-        // player keeps their results screen.
-        const judged = await store.getJudgeResult(gameId).catch(() => null);
-        if (judged) {
-          await this._leaveGameSolo(gameId, playerId);
-          return;
-        }
-        await this.endGame(gameId);
-      } catch (err) {
+      this._onDisconnectGraceExpired(playerId, gameId, { marked }).catch((err) => {
         console.error('[gameManager] disconnect timer failed:', err.message);
-      }
-    }, RECONNECT_GRACE_MS);
+      });
+    }, delayMs);
 
     this.pendingDisconnects.set(playerId, handle);
+  }
+
+  async _onDisconnectGraceExpired(playerId, gameId, { marked = true } = {}) {
+    // If the game has already been torn down (peer hit Leave, TTL
+    // expiry, etc.), nothing to do.
+    const state = await store.loadGameState(gameId);
+    if (!state) return;
+
+    const game = this._hydrate(state);
+    const sym = game?.symbolFor?.(playerId);
+    if (sym && game.matchRequests?.[sym] === false) {
+      await this.handlePassMatch(playerId, gameId);
+      return;
+    }
+
+    // Cross-instance reconnection check. If the user has any live
+    // socket anywhere in the cluster, treat them as reconnected.
+    const sockets = await this.io.in(userRoom(playerId)).fetchSockets();
+    if (sockets.length > 0) {
+      // Online — any recorded drop is stale (e.g. a duplicate socket's
+      // timeout). Clear it so it can't shorten a future grace window.
+      await store.clearPlayerDisconnect(playerId).catch(() => {});
+      return;
+    }
+
+    // Cluster-safe grace: only forfeit once the user's most recent drop is
+    // at least RECONNECT_GRACE_MS old. A reconnect on another instance
+    // deletes the mark (they came back — a later drop there re-marks it
+    // with a newer timestamp), so a stale timer here must not fire early.
+    let offlineForMs = null;
+    let markReadFailed = false;
+    try {
+      const mark = await store.getPlayerDisconnect(playerId);
+      if (mark && mark.gameId === gameId) {
+        offlineForMs = Date.now() - mark.at;
+        const remaining = RECONNECT_GRACE_MS - offlineForMs;
+        if (remaining > 250) {
+          // Newer drop recorded elsewhere. Re-arm for what's left so the
+          // forfeit still happens even if that instance's timer is gone.
+          console.log(
+            `[gameManager] grace re-armed userId=${playerId} gameId=${gameId} remainingMs=${remaining}`
+          );
+          this._armDisconnectTimer(playerId, gameId, remaining + 100);
+          return;
+        }
+      } else if (!mark && marked) {
+        // No mark and no sockets: they reattached (which clears the mark)
+        // and their next drop hasn't been processed yet. That drop will
+        // arm its own timer — don't forfeit on this stale one. (If we never
+        // managed to write the mark in the first place, fall through and
+        // forfeit as before.)
+        console.log(
+          `[gameManager] grace timer skipped userId=${playerId} gameId=${gameId} (reattached since drop)`
+        );
+        return;
+      }
+    } catch (err) {
+      // Redis unavailable — keep the pre-existing behaviour (forfeit now).
+      markReadFailed = true;
+      console.error('[gameManager] getPlayerDisconnect failed:', err.message);
+    }
+
+    const offlineLabel = offlineForMs !== null ? `${Math.round(offlineForMs / 1000)}s` : (markReadFailed ? 'unknown' : 'n/a');
+    console.log(
+      `[gameManager] grace expired — forfeit userId=${playerId} gameId=${gameId} offline=${offlineLabel}`
+    );
+
+    // Treat a real disconnect (no reconnection within the grace window)
+    // of a started debate as a forfeit. Idempotent via debateResults.
+    try {
+      await rewards.processForfeit(gameId, playerId, { cause: 'disconnect' });
+    } catch (err) {
+      console.error('[gameManager] forfeit (disconnect) failed:', err.message);
+    }
+
+    const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+    if (otherId) {
+      this.io.to(userRoom(otherId)).emit('opponentDisconnected', {
+        message: 'Player has disconnected',
+        gameId,
+        kind: 'disconnected'
+      });
+    }
+
+    const judged = await store.getJudgeResult(gameId).catch(() => null);
+
+    // The dropped player is offline right now, so they can't receive any
+    // of this. Leave them a notice so their next connection takes them
+    // out of the dead debate instead of leaving them in it alone.
+    await store.setEndedNotice(playerId, {
+      gameId,
+      reason: judged ? 'ended_while_away' : 'forfeit_disconnect',
+      kind: 'disconnected',
+      message: judged
+        ? 'This debate ended while you were away.'
+        : 'You lost connection and were removed from the debate.'
+    }).catch(() => {});
+    await store.clearPlayerDisconnect(playerId).catch(() => {});
+
+    // Post-judging, a disconnect only removes that player — the other
+    // player keeps their results screen.
+    if (judged) {
+      await this._leaveGameSolo(gameId, playerId);
+      return;
+    }
+    await this.endGame(gameId, { endReason: 'forfeit_disconnect', endedBy: playerId });
   }
 
   // Called from io.on('connection') when a fresh socket arrives carrying a
@@ -920,6 +1029,9 @@ class GameManager {
       clearTimeout(pending);
       this.pendingDisconnects.delete(userId);
     }
+    // They're back. Clear the cluster-wide drop mark so a grace timer still
+    // pending on ANOTHER instance sees "reattached" instead of forfeiting.
+    await store.clearPlayerDisconnect(userId).catch(() => {});
 
     // Push current game state to just this socket so the freshly-loaded
     // client doesn't have a stale view.

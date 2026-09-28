@@ -324,7 +324,11 @@ function bothPlayersSilent(state) {
 // it's a no-reward tie. Otherwise the quitter loses and the opponent wins,
 // even if the debate was very short. Called from gameManager BEFORE the
 // game is torn down. Safe to call more than once (idempotent via debateResults).
-async function processForfeit(gameId, quitterId) {
+// `cause` distinguishes how the forfeit happened in debateResults.reason:
+//   'left'       → 'forfeit'            (player tapped Quit / sent leaveGame)
+//   'disconnect' → 'forfeit_disconnect' (grace timer expired, never came back)
+// Both silent-debate and already-judged cases keep their existing reasons.
+async function processForfeit(gameId, quitterId, { cause = 'left' } = {}) {
   const db = getDb();
   if (!db) return null;
   const state = await store.loadGameState(gameId);
@@ -349,7 +353,13 @@ async function processForfeit(gameId, quitterId) {
       gameId,
       gameType,
       outcome,
-      reason: judgedOutcome ? 'completed' : (silent ? 'forfeit_no_speech' : 'forfeit'),
+      reason: judgedOutcome
+        ? 'completed'
+        : silent
+          ? 'forfeit_no_speech'
+          : cause === 'disconnect'
+            ? 'forfeit_disconnect'
+            : 'forfeit',
       startedAt: state.startedAt,
       friendly: state.isFriendly === true || state.isFriendly === 'true',
       aiGame: state.isAIGame === true || state.isAIGame === 'true',

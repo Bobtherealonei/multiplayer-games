@@ -67,7 +67,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'exit-kind-grace60-1';
+const SERVER_VERSION = 'cluster-grace-gameended-1';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -115,10 +115,49 @@ io.on('connection', async (socket) => {
       console.log(`  ↳ reattached to active game for userId=${userId}`);
     } else if (await lobbyManager.reattachLobby(userId, socket)) {
       console.log(`  ↳ reattached to active lobby for userId=${userId}`);
+    } else {
+      // No live game. If one ENDED while they were offline (grace-timer
+      // forfeit, or the opponent quit while they were backgrounded), tell
+      // this socket so the app can leave the dead debate screen. Delivered
+      // once; clients that don't know the event ignore it.
+      const notice = await store.takeEndedNotice(userId);
+      if (notice) {
+        console.log(`  ↳ delivering gameEnded notice userId=${userId} gameId=${notice.gameId} reason=${notice.reason}`);
+        socket.emit('gameEnded', notice);
+      }
     }
   } catch (err) {
     console.error('[connection] reattach failed:', err.message);
   }
+
+  // Client thinks it's mid-debate (e.g. app came back from the background)
+  // and asks whether that game is still alive. If it is, the connection
+  // handler above already reattached — nothing to do. If not, answer with
+  // gameEnded so the client exits instead of debating an empty room.
+  socket.on('resumeGame', async (data) => {
+    const payload = Array.isArray(data) ? data[0] : data;
+    const askedGameId = typeof payload?.gameId === 'string' ? payload.gameId : null;
+    if (!askedGameId) return;
+    try {
+      const liveGameId = await store.getPlayerGame(userId);
+      if (liveGameId === askedGameId && (await store.loadGameState(askedGameId))) {
+        return; // still live; reattach already happened on connect
+      }
+      const stored = await store.takeEndedNotice(userId);
+      const notice = stored && stored.gameId === askedGameId
+        ? stored
+        : {
+            gameId: askedGameId,
+            reason: 'not_found',
+            kind: 'disconnected',
+            message: 'This debate has already ended.'
+          };
+      console.log(`[resumeGame] userId=${userId} gameId=${askedGameId} → gameEnded reason=${notice.reason}`);
+      socket.emit('gameEnded', notice);
+    } catch (err) {
+      console.error('[resumeGame] failed:', err.message);
+    }
+  });
 
   socket.on('findMatch', async (data) => {
     const payload = Array.isArray(data) ? data[0] : data;
