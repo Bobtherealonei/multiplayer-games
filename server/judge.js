@@ -90,9 +90,10 @@ No Support/Oppose assignments were recorded for this debate. Score each player o
     'SIDE-FIDELITY CHECK (do this FIRST, for each player separately):',
     'Before scoring quality, decide for each player whether their arguments actually defend their ASSIGNED side above.',
     '- Argued their assigned side: score normally on the quality scale.',
-    '- Mostly argued the OPPOSITE of their assigned side (e.g. a Supporter attacking the statement, or an Opposer defending it): cap that player at 3, no matter how well-written their points are. Say so in the review.',
+    '- Mostly argued the OPPOSITE of their assigned side (e.g. a Supporter attacking the statement, or an Opposer defending it): cap that player at 1, no matter how well-written their points are — they contributed nothing to the case they were given. Say so in the review.',
     '- Mixed (some correct-side points, some wrong-side): score only the correct-side contributions and deduct 1-2 points for the confusion.',
     '- Merely QUOTING or rebutting the opponent\'s side does not count as arguing the wrong side — only their own affirmative case matters.',
+    '- A player who made at least ONE relevant argument for their ASSIGNED side scores at least 3, even if it was brief, unpolished, or unsupported. A wrong-side-capped player can therefore never outscore an opponent who argued their own side at all.',
     '',
     'Also when scoring:',
     '- Reward clear, relevant arguments that advance their ASSIGNED side with reasoning, examples, and evidence.',
@@ -162,17 +163,19 @@ SCORING SCALE (apply STRICTLY — do not inflate scores out of politeness)
 - 0  = did not participate at all (no messages, or only whitespace).
 - 1  = only sent gibberish, spam, or a single useless message.
 - 2  = ONLY insults, profanity, slurs, hate speech, or trolling. No actual argument.
-- 3  = weak, off-topic, or contradictory; almost no reasoning. ALSO the maximum for a player who mostly argued the WRONG assigned side (see side-fidelity check).
+- 3  = weak, off-topic, or contradictory; almost no reasoning. ALSO the minimum for a player who made at least one relevant argument for their assigned side.
+       (A player who mostly argued the WRONG assigned side is capped at 1 — see side-fidelity check.)
 - 4  = touches the topic but argument is unclear, unsupported, OR mostly repeats points the opponent already answered.
 - 5-6 = average — makes relevant points on their assigned side but does not really engage the opponent's arguments, or offers little support for their own.
 - 7-8 = strong — clear reasoning on their assigned side, directly answers the opponent's main points, and gives at least one concrete example, scenario, or piece of evidence; factually accurate.
 - 9-10 = excellent — persuasive on their assigned side, answers every significant rebuttal, multiple specific well-connected points, no falsehoods.
 
-ANY of these caps a player at 2 OR LOWER, regardless of length:
+ANY of these caps a player at 2 OR LOWER — but ONLY when that is essentially ALL the player did (they made no actual argument for their side):
 - Insults, profanity, slurs, or hate speech with no actual argument.
 - Personal attacks instead of addressing the question.
-- Pure trolling / off-topic spam.
+- Pure trolling / off-topic spam with no actual argument.
 ${falseClaimCap}
+A player who made a real argument and ALSO sent some banter, a casual sign-off ("good one", "you too"), a joke, or an off-topic aside is NOT capped by these — score their argument on its merits and ignore the filler. Only hostility or hate speech mixed in with a real argument should cost points (deduct 1-2), never a hard cap.
 
 DO NOT
 - Do not adjust scores so they come out equal or unequal — score each player on their own merits, ignoring what the other got.

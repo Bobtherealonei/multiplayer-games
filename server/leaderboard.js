@@ -40,10 +40,13 @@ async function fetchTopDebaters() {
     throw err;
   }
 
+  // Over-fetch so that internal test accounts (users/{uid}.isTestAccount)
+  // can be dropped without shrinking the board below LIMIT. Test accounts
+  // are never prize-eligible, so they must not appear in prize positions.
   const usersSnap = await db
     .collection('users')
     .orderBy('rankTokens', 'desc')
-    .limit(LIMIT)
+    .limit(LIMIT * 3)
     .get();
 
   if (usersSnap.empty) return [];
@@ -51,7 +54,11 @@ async function fetchTopDebaters() {
   const entries = [];
   const profileRefs = [];
 
-  usersSnap.docs.forEach((doc, index) => {
+  const eligibleDocs = usersSnap.docs
+    .filter((doc) => (doc.data() || {}).isTestAccount !== true)
+    .slice(0, LIMIT);
+
+  eligibleDocs.forEach((doc, index) => {
     const data = doc.data() || {};
     const trophies = Number.isFinite(data.rankTokens) ? data.rankTokens : 0;
     entries.push({

@@ -126,10 +126,15 @@ async function processResult({
   friendly = false,
   aiGame = false,
   skipDurationCheck = false,
-  skipRewardsReason = null
+  skipRewardsReason = null,
+  // Optional judge verdict details (scores + review) stored alongside the
+  // result so the admin panel can show WHY a debate was decided the way it
+  // was — otherwise the only record of the scores is the server log.
+  judge = null
 }) {
   const db = getDb();
   if (!db) throw new Error('Firestore unavailable');
+  const judgeFields = judge ? { judge } : {};
   const admin = getAdmin();
   const FieldValue = admin.firestore.FieldValue;
 
@@ -187,6 +192,7 @@ async function processResult({
         winnerId,
         loserId,
         reason: reason || 'completed',
+        ...judgeFields,
         completedAt: FieldValue.serverTimestamp()
       });
       console.log(
@@ -269,6 +275,7 @@ async function processResult({
       winnerId,
       loserId,
       reason: reason || 'completed',
+      ...judgeFields,
       completedAt: FieldValue.serverTimestamp()
     });
 
@@ -285,6 +292,20 @@ async function processResult({
       )
     };
   });
+}
+
+// Compact copy of the verdict for debateResults.judge (X = player1, O = player2).
+function judgeSummary(judge) {
+  if (!judge) return null;
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  return {
+    scoreX: num(judge.scoreX),
+    scoreO: num(judge.scoreO),
+    player1Score: num(judge.scoreX),
+    player2Score: num(judge.scoreO),
+    winner: judge.winner || null,
+    review: typeof judge.review === 'string' ? judge.review.slice(0, 2000) : null
+  };
 }
 
 // Translate the judge verdict (X=player1/P1, O=player2/P2) into an outcome.
@@ -365,7 +386,8 @@ async function processForfeit(gameId, quitterId, { cause = 'left' } = {}) {
       aiGame: state.isAIGame === true || state.isAIGame === 'true',
       // Ranked forfeits still pay even under the 2-minute anti-farm window.
       skipDurationCheck: !judgedOutcome,
-      skipRewardsReason: silent ? 'no_speech' : null
+      skipRewardsReason: silent ? 'no_speech' : null,
+      judge: judgedOutcome ? judgeSummary(judge) : null
     });
   } catch (err) {
     console.error('[rewards] processForfeit failed:', err.message);
@@ -422,7 +444,8 @@ function makeRouter() {
         reason: 'completed',
         startedAt: state.startedAt,
         friendly: state.isFriendly === true || state.isFriendly === 'true',
-        aiGame: state.isAIGame === true || state.isAIGame === 'true'
+        aiGame: state.isAIGame === true || state.isAIGame === 'true',
+        judge: judgeSummary(judge)
       });
       // Return only the caller's view.
       const myBalances = summary.balances ? summary.balances[uid] : null;

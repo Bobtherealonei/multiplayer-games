@@ -746,7 +746,10 @@ class GameManager {
     const otherStillIn =
       otherId && otherId !== AI_OPPONENT_ID ? await store.getPlayerGame(otherId) : null;
     if (otherStillIn !== gameId) {
-      await this.endGame(gameId);
+      // Solo-leave only happens post-judging (results screen) or on a pass,
+      // so record the debate as completed on the transcript doc.
+      const judged = await store.getJudgeResult(gameId).catch(() => null);
+      await this.endGame(gameId, judged ? { endReason: 'completed' } : null);
     }
   }
 
