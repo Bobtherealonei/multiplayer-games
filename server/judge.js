@@ -533,20 +533,16 @@ async function runJudge({ mode, recency, topic, question, safeMessages, names, s
 }
 
 // ── AI-game handicap ───────────────────────────────────────────────────────
-// Human-vs-AI debates are tilted slightly toward the human: the AI is built
-// to rebut every message, so a fair judge hands it most close calls, which
-// makes a new player's first debates feel unwinnable. After judging, the
-// human gets a small bonus. Human-vs-human games are untouched.
-// Tunable via env so it can be dialled as the player base grows:
-//   AI_GAME_HUMAN_BONUS   integer added to the human's score (default 1)
-//   AI_GAME_TIE_TO_HUMAN  'true' to also hand the human every post-bonus tie
+// Optional tilt toward the human in human-vs-AI debates. OFF by default —
+// the judge's verdict stands as-is, so wins track skill. Human-vs-human
+// games are never touched. Env knobs if the balance ever needs a nudge:
+//   AI_GAME_HUMAN_BONUS   integer added to the human's score (default 0)
+//   AI_GAME_TIE_TO_HUMAN  'true' to hand the human every post-bonus tie
 //                         (default off — a tie stays a draw)
-// History: launched 9/27 with bonus 1 + ties-to-human; that produced an 85%
-// human win rate with zero draws (human lost only when out-scored by 2+), so
-// on 9/29 the tie rule was switched off. Net effect now: human wins when
-// their raw score >= the AI's, draws when exactly one point behind, loses
-// when two or more behind.
-const AI_GAME_HUMAN_BONUS = Math.max(0, parseInt(process.env.AI_GAME_HUMAN_BONUS ?? '1', 10) || 0);
+// History: launched 9/27 with bonus 1 + ties-to-human → 85% human win rate,
+// zero draws. 9/29: tie rule off, then bonus removed the same night so the
+// outcome is purely the judge's scores.
+const AI_GAME_HUMAN_BONUS = Math.max(0, parseInt(process.env.AI_GAME_HUMAN_BONUS ?? '0', 10) || 0);
 const AI_GAME_TIE_TO_HUMAN = process.env.AI_GAME_TIE_TO_HUMAN === 'true';
 // Below this raw score the human was silent, trolling, or hostile (the
 // prompt caps those at 2) — no bonus for that.
@@ -554,6 +550,8 @@ const HANDICAP_MIN_HUMAN_SCORE = 3;
 
 function applyAIGameHandicap(result, state) {
   if (!result || !state) return result;
+  // Both knobs off: the judge's verdict is final, untouched.
+  if (AI_GAME_HUMAN_BONUS === 0 && !AI_GAME_TIE_TO_HUMAN) return result;
   const humanSymbol = state.player1Id === AI_OPPONENT_ID ? 'O'
     : state.player2Id === AI_OPPONENT_ID ? 'X'
     : null;
