@@ -536,12 +536,18 @@ async function runJudge({ mode, recency, topic, question, safeMessages, names, s
 // Human-vs-AI debates are tilted slightly toward the human: the AI is built
 // to rebut every message, so a fair judge hands it most close calls, which
 // makes a new player's first debates feel unwinnable. After judging, the
-// human gets a small bonus and wins ties. Human-vs-human games are untouched.
-// Tunable via env so it can be dialled down as the player base grows:
+// human gets a small bonus. Human-vs-human games are untouched.
+// Tunable via env so it can be dialled as the player base grows:
 //   AI_GAME_HUMAN_BONUS   integer added to the human's score (default 1)
-//   AI_GAME_TIE_TO_HUMAN  'false' to let ties stand (default: human wins ties)
+//   AI_GAME_TIE_TO_HUMAN  'true' to also hand the human every post-bonus tie
+//                         (default off — a tie stays a draw)
+// History: launched 9/27 with bonus 1 + ties-to-human; that produced an 85%
+// human win rate with zero draws (human lost only when out-scored by 2+), so
+// on 9/29 the tie rule was switched off. Net effect now: human wins when
+// their raw score >= the AI's, draws when exactly one point behind, loses
+// when two or more behind.
 const AI_GAME_HUMAN_BONUS = Math.max(0, parseInt(process.env.AI_GAME_HUMAN_BONUS ?? '1', 10) || 0);
-const AI_GAME_TIE_TO_HUMAN = process.env.AI_GAME_TIE_TO_HUMAN !== 'false';
+const AI_GAME_TIE_TO_HUMAN = process.env.AI_GAME_TIE_TO_HUMAN === 'true';
 // Below this raw score the human was silent, trolling, or hostile (the
 // prompt caps those at 2) — no bonus for that.
 const HANDICAP_MIN_HUMAN_SCORE = 3;
