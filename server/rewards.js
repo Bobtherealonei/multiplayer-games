@@ -308,6 +308,26 @@ function judgeSummary(judge) {
   };
 }
 
+// Finalize a judged debate from the cached verdict. Idempotent (processResult
+// guards on rewardsProcessed), so it is safe to call from the client-driven
+// /debate-result route AND from the server when the last player leaves —
+// whichever happens first pays both players. Returns null if the verdict
+// cannot be mapped to an outcome.
+async function settleJudgedResult(gameId, state, judge) {
+  const outcome = outcomeFromJudge(state, judge);
+  if (!outcome) return null;
+  return processResult({
+    gameId,
+    gameType: state.gameType,
+    outcome,
+    reason: 'completed',
+    startedAt: state.startedAt,
+    friendly: state.isFriendly === true || state.isFriendly === 'true',
+    aiGame: state.isAIGame === true || state.isAIGame === 'true',
+    judge: judgeSummary(judge)
+  });
+}
+
 // Translate the judge verdict (X=player1/P1, O=player2/P2) into an outcome.
 function outcomeFromJudge(state, judge) {
   const p1 = state.player1Id;
@@ -433,20 +453,10 @@ function makeRouter() {
       // Judge hasn't finished yet — client should retry shortly.
       return res.json({ status: 'pending' });
     }
-    const outcome = outcomeFromJudge(state, judge);
-    if (!outcome) return res.json({ status: 'noResult' });
 
     try {
-      const summary = await processResult({
-        gameId,
-        gameType: state.gameType,
-        outcome,
-        reason: 'completed',
-        startedAt: state.startedAt,
-        friendly: state.isFriendly === true || state.isFriendly === 'true',
-        aiGame: state.isAIGame === true || state.isAIGame === 'true',
-        judge: judgeSummary(judge)
-      });
+      const summary = await settleJudgedResult(gameId, state, judge);
+      if (!summary) return res.json({ status: 'noResult' });
       // Return only the caller's view.
       const myBalances = summary.balances ? summary.balances[uid] : null;
       const myApplied = summary.applied ? summary.applied[uid] : null;
@@ -469,4 +479,4 @@ function makeRouter() {
   return router;
 }
 
-module.exports = { makeRouter, processForfeit, processResult };
+module.exports = { makeRouter, processForfeit, processResult, settleJudgedResult };

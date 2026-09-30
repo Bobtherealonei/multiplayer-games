@@ -46,6 +46,18 @@ const { pickNextQuestionForPair } = require('./questionPicker');
 // a player reads and thinks (30s default) — this gives them time to unlock.
 const RECONNECT_GRACE_MS = 60000;
 
+// The iOS Pass button sends `leaveGame` with exactly this reason. Shipped
+// clients do this the moment the 8th turn ends — often while the judge is
+// still running — so it must never be mistaken for a mid-debate quit.
+const PASS_LEAVE_REASON = 'Your opponent skipped';
+// A Pass reason is only trusted as "debate is over" once the debate has run
+// long enough to plausibly have finished (8 × 45s turns; startedAt is set at
+// the first message). Blocks a hacked client from dodging a forfeit early.
+const MIN_PASS_ELAPSED_MS = 4 * 60 * 1000;
+// How long the last player's leave will wait for an in-flight verdict before
+// giving up and tearing the game down without a result.
+const JUDGE_SETTLE_WAIT_MS = 45000;
+
 // Live question pools an AI/philosopher debate can draw from ('custom' has no
 // pool of its own). Philosopher debates pick one of these at random.
 const AI_TOPIC_POOL = [...LIVE_GAME_TYPES].filter((t) => t !== 'custom');
@@ -746,11 +758,51 @@ class GameManager {
     const otherStillIn =
       otherId && otherId !== AI_OPPONENT_ID ? await store.getPlayerGame(otherId) : null;
     if (otherStillIn !== gameId) {
-      // Solo-leave only happens post-judging (results screen) or on a pass,
-      // so record the debate as completed on the transcript doc.
-      const judged = await store.getJudgeResult(gameId).catch(() => null);
-      await this.endGame(gameId, judged ? { endReason: 'completed' } : null);
+      // Last human is gone. Solo-leave only happens post-debate (results
+      // screen / pass), so make sure the verdict is settled into rewards
+      // BEFORE the state is deleted — the clients may both have left before
+      // either called /debate-result. Waits for an in-flight judge.
+      const settled = await this._settleJudgedGame(gameId, state);
+      await this.endGame(gameId, settled ? { endReason: 'completed' } : null);
     }
+  }
+
+  // Pay out a judged debate server-side (idempotent with /debate-result).
+  // Returns true if a verdict existed (or arrived within the wait window).
+  async _settleJudgedGame(gameId, state) {
+    let judge = await store.getJudgeResult(gameId).catch(() => null);
+    if (!judge) {
+      const start = Date.now();
+      const deadline = start + JUDGE_SETTLE_WAIT_MS;
+      // The clients fire /judge at the same instant the Pass button appears,
+      // so the lock may not be held yet on the very first check — give it a
+      // few seconds to show up before concluding nobody asked for a verdict.
+      const lockGraceUntil = start + 3000;
+      while (!judge && Date.now() < deadline) {
+        const judging = await store.isJudgeInProgress(gameId).catch(() => false);
+        if (!judging && Date.now() >= lockGraceUntil) {
+          // Not running and nothing cached — either it already failed or it
+          // was never requested. One last read in case it landed just now.
+          judge = await store.getJudgeResult(gameId).catch(() => null);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+        judge = await store.getJudgeResult(gameId).catch(() => null);
+      }
+    }
+    if (!judge) return false;
+    try {
+      const summary = await rewards.settleJudgedResult(gameId, state, judge);
+      if (summary) {
+        console.log(
+          `[gameManager] settled judged gameId=${gameId} result=${summary.result} ` +
+            `winner=${summary.winnerId || 'none'} alreadyProcessed=${summary.alreadyProcessed === true}`
+        );
+      }
+    } catch (err) {
+      console.error(`[gameManager] settle judged gameId=${gameId} failed:`, err.message);
+    }
+    return true;
   }
 
   async handleLeaveGame(playerId, message = 'Player has disconnected') {
@@ -767,11 +819,49 @@ class GameManager {
       }
     }
 
-    // If the debate had already started, quitting counts as a loss for the
-    // quitter and a win for the opponent. Process BEFORE teardown so the game
-    // state (player IDs, startedAt) is still in Redis. Idempotent. (When a
-    // judge verdict already exists, processForfeit finalizes THAT outcome
-    // instead — leaving the results screen never flips a win to a loss.)
+    // Debate already over? The game only exists so players can read their
+    // scores — one player leaving must not kick the other off the results
+    // screen or turn a finished debate into a forfeit. Tear down just the
+    // leaver; the game ends (and the verdict is settled into rewards) when
+    // the last human exits. The opponent still gets an `opponentSkipped` so
+    // their Match/Pass card resolves immediately instead of waiting forever.
+    //
+    // "Over" means any of: verdict cached; verdict being computed right now
+    // (the judge lock is held — the Pass button appears while the judge is
+    // still running); or the client explicitly passed after a full-length
+    // debate. Previously only the first counted, so a Pass during the
+    // "Reviewing the debate…" spinner was processed as a quit: the passer
+    // took a forfeit loss and the opponent was kicked out with a win.
+    const judged = await store.getJudgeResult(gameId).catch(() => null);
+    const judging = !judged && (await store.isJudgeInProgress(gameId).catch(() => false));
+    const elapsedMs = state && Number(state.startedAt) > 0 ? Date.now() - Number(state.startedAt) : 0;
+    const passed = message === PASS_LEAVE_REASON && elapsedMs >= MIN_PASS_ELAPSED_MS;
+    if (judged || judging || passed) {
+      console.log(
+        `[gameManager] post-debate leave userId=${playerId} gameId=${gameId} ` +
+          `judged=${Boolean(judged)} judging=${judging} passed=${passed} elapsed=${Math.round(elapsedMs / 1000)}s`
+      );
+      const otherId = state
+        ? (state.player1Id === playerId ? state.player2Id : state.player1Id)
+        : null;
+      if (otherId && otherId !== AI_OPPONENT_ID) {
+        this.io.to(userRoom(otherId)).emit('opponentSkipped', {
+          message: 'The other player skipped',
+          gameId
+        });
+      }
+      // Verdict already in? Lock the rewards in now (idempotent) so leaving
+      // the results screen can never change the outcome later.
+      if (judged && state) {
+        await this._settleJudgedGame(gameId, state);
+      }
+      await this._leaveGameSolo(gameId, playerId);
+      return;
+    }
+
+    // Mid-debate quit: counts as a loss for the quitter and a win for the
+    // opponent. Process BEFORE teardown so the game state (player IDs,
+    // startedAt) is still in Redis. Idempotent.
     try {
       await rewards.processForfeit(gameId, playerId, { cause: 'left' });
     } catch (err) {
@@ -798,27 +888,6 @@ class GameManager {
       } catch (err) {
         console.error('[gameManager] ended-notice (leave) failed:', err.message);
       }
-    }
-
-    // Debate already judged? The game only exists so players can read their
-    // scores — one player leaving must not kick the other off the results
-    // screen. Tear down just the leaver; the game ends when the last human
-    // exits. The opponent still gets an `opponentSkipped` so their Match/Pass
-    // card resolves immediately (a match is no longer possible) instead of
-    // waiting forever on a player who already passed.
-    const judged = await store.getJudgeResult(gameId).catch(() => null);
-    if (judged) {
-      const otherId = state
-        ? (state.player1Id === playerId ? state.player2Id : state.player1Id)
-        : null;
-      if (otherId && otherId !== AI_OPPONENT_ID) {
-        this.io.to(userRoom(otherId)).emit('opponentSkipped', {
-          message: 'The other player skipped',
-          gameId
-        });
-      }
-      await this._leaveGameSolo(gameId, playerId);
-      return;
     }
 
     // `kind` lets newer clients say "your opponent left" instead of

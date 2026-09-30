@@ -636,6 +636,14 @@ async function releaseJudgeLock(gameId) {
   await client.del(`judge-lock:${gameId}`);
 }
 
+// True while some instance is computing the verdict for this game — i.e. the
+// debate is over and the results screen is up, even though no verdict is
+// cached yet.
+async function isJudgeInProgress(gameId) {
+  const n = await client.exists(`judge-lock:${gameId}`);
+  return n === 1;
+}
+
 module.exports = {
   // game state
   saveGameState,
@@ -697,4 +705,5 @@ module.exports = {
   setJudgeResult,
   tryAcquireJudgeLock,
   releaseJudgeLock,
+  isJudgeInProgress,
 };
