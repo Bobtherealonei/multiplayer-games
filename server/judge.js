@@ -536,16 +536,16 @@ async function runJudge({ mode, recency, topic, question, safeMessages, names, s
 }
 
 // ── AI-game handicap ───────────────────────────────────────────────────────
-// Optional tilt toward the human in human-vs-AI debates. OFF by default —
-// the judge's verdict stands as-is, so wins track skill. Human-vs-human
-// games are never touched. Env knobs if the balance ever needs a nudge:
-//   AI_GAME_HUMAN_BONUS   integer added to the human's score (default 0)
+// Small tilt toward the human in human-vs-AI debates. Human-vs-human games
+// are never touched. Env knobs:
+//   AI_GAME_HUMAN_BONUS   integer added to the human's score (default 1)
 //   AI_GAME_TIE_TO_HUMAN  'true' to hand the human every post-bonus tie
 //                         (default off — a tie stays a draw)
 // History: launched 9/27 with bonus 1 + ties-to-human → 85% human win rate,
 // zero draws. 9/29: tie rule off, then bonus removed the same night so the
-// outcome is purely the judge's scores.
-const AI_GAME_HUMAN_BONUS = Math.max(0, parseInt(process.env.AI_GAME_HUMAN_BONUS ?? '0', 10) || 0);
+// outcome was purely the judge's scores. 10/1: +1 restored (ties still
+// draws) — pure scores made AI debates feel too hard.
+const AI_GAME_HUMAN_BONUS = Math.max(0, parseInt(process.env.AI_GAME_HUMAN_BONUS ?? '1', 10) || 0);
 const AI_GAME_TIE_TO_HUMAN = process.env.AI_GAME_TIE_TO_HUMAN === 'true';
 // Below this raw score the human was silent, trolling, or hostile (the
 // prompt caps those at 2) — no bonus for that.
