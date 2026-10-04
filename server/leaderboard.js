@@ -114,8 +114,57 @@ async function fetchTopDebaters(limit = DEFAULT_LIMIT) {
   return entries;
 }
 
+// Where a single user stands overall (not just within the top 100).
+// Rank = 1 + number of users with strictly more trophies, so ties share a
+// rank, matching the ordering of the board itself. Uses count aggregations:
+// one billed read each regardless of how many users match.
+async function fetchUserRank(userId) {
+  const db = getDb();
+  if (!db) {
+    const err = new Error('Firestore unavailable');
+    err.status = 503;
+    throw err;
+  }
+
+  const userSnap = await db.collection('users').doc(userId).get();
+  if (!userSnap.exists) {
+    const err = new Error('User not found');
+    err.status = 404;
+    throw err;
+  }
+  const data = userSnap.data() || {};
+  const trophies = Number.isFinite(data.rankTokens) ? data.rankTokens : 0;
+
+  const users = db.collection('users');
+  const [aboveSnap, totalSnap] = await Promise.all([
+    users.where('rankTokens', '>', trophies).count().get(),
+    users.where('rankTokens', '>=', 0).count().get(),
+  ]);
+
+  return {
+    userId,
+    trophies,
+    rank: aboveSnap.data().count + 1,
+    totalPlayers: totalSnap.data().count,
+  };
+}
+
 function makeRouter() {
   const router = express.Router();
+
+  router.get('/leaderboard/rank', async (req, res) => {
+    const userId = typeof req.query.userId === 'string' ? req.query.userId.trim() : '';
+    if (!userId || userId.length > 128) {
+      return res.status(400).json({ error: 'userId required' });
+    }
+    try {
+      return res.json(await fetchUserRank(userId));
+    } catch (err) {
+      const status = err.status && err.status >= 400 && err.status < 600 ? err.status : 500;
+      if (status >= 500) console.error('[leaderboard] rank error:', err.message);
+      return res.status(status).json({ error: 'Could not load rank' });
+    }
+  });
 
   router.get('/leaderboard', async (req, res) => {
     try {
@@ -131,4 +180,4 @@ function makeRouter() {
   return router;
 }
 
-module.exports = { makeRouter, fetchTopDebaters };
+module.exports = { makeRouter, fetchTopDebaters, fetchUserRank };
