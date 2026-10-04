@@ -636,6 +636,24 @@ async function releaseJudgeLock(gameId) {
   await client.del(`judge-lock:${gameId}`);
 }
 
+// ── Client capabilities ─────────────────────────────────────────────────
+// What the user's current app build supports, recorded at socket connect
+// (from the handshake) so game creation on ANY instance can read it.
+// `serverTurns`: the client takes its per-turn chat length from the game
+// state instead of a hardcoded 45 s. Legacy builds send nothing → defaults.
+
+const CLIENT_CAPS_TTL_SECONDS = 24 * 60 * 60;
+
+async function setClientCaps(userId, caps) {
+  await client.set(`client-caps:${userId}`, JSON.stringify(caps || {}), 'EX', CLIENT_CAPS_TTL_SECONDS);
+}
+
+async function getClientCaps(userId) {
+  const raw = await client.get(`client-caps:${userId}`);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (_) { return null; }
+}
+
 // True while some instance is computing the verdict for this game — i.e. the
 // debate is over and the results screen is up, even though no verdict is
 // cached yet.
@@ -706,4 +724,7 @@ module.exports = {
   tryAcquireJudgeLock,
   releaseJudgeLock,
   isJudgeInProgress,
+  // client capabilities
+  setClientCaps,
+  getClientCaps,
 };

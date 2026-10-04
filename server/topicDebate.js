@@ -325,6 +325,10 @@ class TopicDebate extends Game {
     this.preChosenMatch = null;
     this.player1Position = null;
     this.player2Position = null;
+    // Debate clock for THIS game, set by gameManager.createGame (seconds).
+    // null until set; clients fall back to their legacy length.
+    this.turnSeconds = null;
+    this.thinkingSeconds = null;
     ensureFreshCache();
   }
 
@@ -436,7 +440,9 @@ class TopicDebate extends Game {
       questionId: this.questionId,
       player1Position: this.player1Position,
       player2Position: this.player2Position,
-      matchRequests: { ...this.matchRequests }
+      matchRequests: { ...this.matchRequests },
+      turnSeconds: this.turnSeconds,
+      thinkingSeconds: this.thinkingSeconds
     };
   }
 
@@ -475,7 +481,9 @@ class TopicDebate extends Game {
       isDraw: this.isDraw,
       createdAt: this.createdAt,
       startedAt: this.startedAt,
-      isFriendly: this.isFriendly
+      isFriendly: this.isFriendly,
+      turnSeconds: this.turnSeconds,
+      thinkingSeconds: this.thinkingSeconds
     };
   }
 
@@ -504,6 +512,10 @@ class TopicDebate extends Game {
     this.createdAt = state.createdAt ?? null;
     this.startedAt = state.startedAt ?? null;
     this.isFriendly = state.isFriendly === true || state.isFriendly === 'true';
+    // Redis hashes round-trip numbers as strings.
+    const num = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : null; };
+    this.turnSeconds = num(state.turnSeconds);
+    this.thinkingSeconds = num(state.thinkingSeconds);
     return this;
   }
 }

@@ -67,7 +67,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'judge-categories-1';
+const SERVER_VERSION = 'server-turns-1';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -96,7 +96,16 @@ io.on('connection', async (socket) => {
     socket.id;
   socket.userId = userId;
 
-  console.log(`Player connected: socket.id=${socket.id}, userId=${userId}`);
+  // Record what this build supports (see gameStore.setClientCaps). Older
+  // apps send neither field.
+  const hs = socket.handshake.query || {};
+  const appVersion = typeof hs.appVersion === 'string' ? hs.appVersion.slice(0, 20) : null;
+  const serverTurns = hs.serverTurns === '1' || hs.serverTurns === 'true';
+  store.setClientCaps(userId, { appVersion, serverTurns, at: Date.now() }).catch((err) => {
+    console.error('[connection] setClientCaps failed:', err.message);
+  });
+
+  console.log(`Player connected: socket.id=${socket.id}, userId=${userId} app=${appVersion || 'legacy'} serverTurns=${serverTurns}`);
 
   // Every socket joins this user's personal room. All cross-instance
   // emits to a specific user go through `io.to(userRoom(uid)).emit(...)`,

@@ -46,6 +46,12 @@ const { pickNextQuestionForPair } = require('./questionPicker');
 // a player reads and thinks (30s default) — this gives them time to unlock.
 const RECONNECT_GRACE_MS = 60000;
 
+// Debate clock, sent to clients with the game state (see createGame).
+// TURN_SECONDS is what new builds get; LEGACY is what pre-1.8 apps hardcode.
+const TURN_SECONDS = Math.max(15, parseInt(process.env.TURN_SECONDS ?? '60', 10) || 60);
+const LEGACY_TURN_SECONDS = 45;
+const THINKING_SECONDS = 10;
+
 // The iOS Pass button sends `leaveGame` with exactly this reason. Shipped
 // clients do this the moment the 8th turn ends — often while the judge is
 // still running — so it must never be mistaken for a mid-debate quit.
@@ -160,6 +166,20 @@ class GameManager {
     ]);
 
     const serialized = game.serialize();
+
+    // Per-game turn length. Newer apps run whatever the state says; legacy
+    // builds hardcode 45 s and ignore the field. Hand out the full length
+    // only when every human in the game will honor it — otherwise the two
+    // phones' clocks would disagree.
+    const humans = [player1Id, player2Id].filter((id) => id && id !== AI_OPPONENT_ID);
+    const caps = await Promise.all(humans.map((id) => store.getClientCaps(id).catch(() => null)));
+    const everyoneServerTurns = caps.every((c) => c && c.serverTurns === true);
+    serialized.turnSeconds = everyoneServerTurns ? TURN_SECONDS : LEGACY_TURN_SECONDS;
+    serialized.thinkingSeconds = THINKING_SECONDS;
+    if (!everyoneServerTurns) {
+      console.log(`[gameManager] gameId=${gameId} legacy client in game — turnSeconds=${LEGACY_TURN_SECONDS}`);
+    }
+
     if (isAIGame) {
       serialized.isAIGame = true;
       serialized.chatLog = [];
