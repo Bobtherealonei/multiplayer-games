@@ -304,8 +304,22 @@ function judgeSummary(judge) {
     player1Score: num(judge.scoreX),
     player2Score: num(judge.scoreO),
     winner: judge.winner || null,
-    review: typeof judge.review === 'string' ? judge.review.slice(0, 2000) : null
+    review: typeof judge.review === 'string' ? judge.review.slice(0, 2000) : null,
+    breakdownX: compactBreakdown(judge.breakdownX),
+    breakdownO: compactBreakdown(judge.breakdownO)
   };
+}
+
+// Per-category grades {logic, evidence, rebuttals, clarity} → {score, note}.
+function compactBreakdown(b) {
+  if (!b || typeof b !== 'object') return null;
+  const out = {};
+  for (const key of ['logic', 'evidence', 'rebuttals', 'clarity']) {
+    const c = b[key];
+    if (!c || typeof c.score !== 'number') return null;
+    out[key] = { score: c.score, note: typeof c.note === 'string' ? c.note.slice(0, 200) : '' };
+  }
+  return out;
 }
 
 // Finalize a judged debate from the cached verdict. Idempotent (processResult

@@ -47,9 +47,17 @@ const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 // is always the AI (it is handed news facts every turn).
 const OPENAI_MODEL = 'gpt-4.1';
 
-// Scores + a 2-4 sentence review fit comfortably in 300 tokens; the old 500
-// cap just paid for prose nobody reads.
-const JUDGE_MAX_TOKENS = 520;
+// Working notes + 8 category lines (grade + one sentence each) + scores +
+// a 2-4 sentence review. ~600 tokens typical; headroom for long notes.
+const JUDGE_MAX_TOKENS = 900;
+
+// Category weights for the overall score. Must sum to 1.
+const JUDGE_CATEGORIES = [
+  { key: 'logic', label: 'Logic', weight: 0.35 },
+  { key: 'evidence', label: 'Evidence', weight: 0.25 },
+  { key: 'rebuttals', label: 'Rebuttals', weight: 0.25 },
+  { key: 'clarity', label: 'Clarity', weight: 0.15 },
+];
 
 function stanceDescription(position) {
   if (position === 'support') {
@@ -122,7 +130,7 @@ function buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb) {
 ${sideBlock}
 
 FORMAT OF THIS DEBATE
-- Players alternate turns. Each turn is a chat message typed under a clock of roughly 45 seconds, so messages are short (often one or two sentences).
+- Players alternate turns. Each turn is a chat message typed under a clock of roughly one minute, so messages are short (often one or two sentences).
 - Judge depth RELATIVE to that format. A short message that makes a clear, relevant, well-reasoned point is a strong message. Do not penalize brevity itself, and do not expect essay-length development.
 
 In your scoring output:
@@ -146,12 +154,13 @@ FAIRNESS RULES
 
 You do NOT pick the winner. The application code will compare the two scores numerically — your only job is to set them honestly.
 
-WHAT COUNTS (weigh these roughly equally)
-- REASONING: clear logic that actually supports their side of the statement.
-- CLASH: directly answering the opponent's arguments. Engaging with the opponent's specific point — refuting it, conceding it, or showing why it is outweighed — is worth as much as introducing a new point. Ignoring the opponent's arguments is a weakness.
-- SUPPORT: examples, evidence, and consequences. A specific real-world example, a concrete scenario, or a sound causal argument counts as support just as much as a statistic. A quoted number is NOT automatically stronger than good reasoning, and an unsourced statistic earns no extra credit over a well-explained example.
-- RELEVANCE: staying on the exact debate statement.
-- CLARITY and civility.
+THE FOUR CATEGORIES (grade each 0-10 per player; the overall score is their weighted combination)
+- LOGIC (35%): does their reasoning actually support their side of the statement, and does it hold together? Deduct for logical fallacies — ad hominem (attacking the person), strawman (arguing against something the opponent did not say), moving the goalposts, false dilemma, circular reasoning, appeal to popularity. Name the fallacy in the note when you deduct for one. Staying on the exact debate statement is part of logic; drifting onto side topics costs here.
+- EVIDENCE (25%): do they back their claims with something checkable — a specific real-world example, a concrete scenario, a named event, a number, a sound causal chain — rather than pure personal opinion? A specific example counts as much as a statistic. An unsourced or false statistic earns nothing. ${hasWeb ? 'Where you verified a claim, say whether it held up.' : 'Credit specificity; do not guess about claims you cannot check.'}
+- REBUTTALS (25%): did they directly answer what the opponent actually said? Refuting, conceding, or outweighing the opponent's specific point is worth as much as a new argument. If the opponent made an important point and this player never addressed it, that is a DROPPED ARGUMENT — say which one in the note and grade down. Dodging a direct question to pivot to a new talking point also costs here.
+- CLARITY (15%): readable, concise, civil. Casual language, slang, lowercase and typos do NOT lower this. Toxicity, insults, or spamming lower it sharply.
+
+For each category write ONE short, plain sentence (max 18 words) addressed to the player, e.g. "You never answered their point about cost." or "Strong — you gave a concrete example about Manuel." Be specific, not generic.
 
 PENALIZE (lower the score of the player who does this)
 - Ignoring a direct rebuttal and simply moving on to a new talking point.
@@ -184,9 +193,19 @@ DO NOT
 - Do not favor the player who used more numbers or named more facts if those facts did not answer what the other player actually argued.
 - Do not write "winner" or "tie" anywhere in your output. The code decides that.
 
+OVERALL SCORE: ScoreX / ScoreO must be the weighted combination of that player's four category grades (0.35×Logic + 0.25×Evidence + 0.25×Rebuttals + 0.15×Clarity, rounded), THEN adjusted by the hard rules above: the wrong-side cap (1), the no-argument caps (2 or lower), the floor of 3 for anyone who made at least one real on-side argument, and 0 for a player who did not participate. When a cap or floor changes the score, make the category grades honest anyway — the cap is applied on top.
+
 Return EXACTLY this format (no markdown, no extra prose, no JSON):
 PointsX: <number of distinct arguments ${nameX} made>; <number of ${nameO}'s arguments ${nameX} answered>; <one line listing ${nameX}'s distinct arguments>
 PointsO: <number of distinct arguments ${nameO} made>; <number of ${nameX}'s arguments ${nameO} answered>; <one line listing ${nameO}'s distinct arguments>
+LogicX: <0-10>; <one sentence to ${nameX}>
+EvidenceX: <0-10>; <one sentence to ${nameX}>
+RebuttalsX: <0-10>; <one sentence to ${nameX}>
+ClarityX: <0-10>; <one sentence to ${nameX}>
+LogicO: <0-10>; <one sentence to ${nameO}>
+EvidenceO: <0-10>; <one sentence to ${nameO}>
+RebuttalsO: <0-10>; <one sentence to ${nameO}>
+ClarityO: <0-10>; <one sentence to ${nameO}>
 ScoreX: <integer 0-10>
 ScoreO: <integer 0-10>
 Review: <2-4 sentences>`;
@@ -204,9 +223,49 @@ function parseJudgeReply(content) {
     if (!Number.isFinite(n)) return 5;
     return Math.max(0, Math.min(10, n));
   };
-  const scoreX = parseScore(findLine('scorex:'));
-  const scoreO = parseScore(findLine('scoreo:'));
+  const modelScoreX = parseScore(findLine('scorex:'));
+  const modelScoreO = parseScore(findLine('scoreo:'));
   const review = findLine('review:') || (content || '').trim();
+
+  // Category breakdown: "LogicX: 7; You never answered their cost point."
+  // Optional — an older cached verdict or a malformed reply simply has no
+  // breakdown and the overall falls back to the model's ScoreX/ScoreO.
+  const parseCategory = (raw) => {
+    if (!raw) return null;
+    const semi = raw.indexOf(';');
+    const numPart = semi >= 0 ? raw.slice(0, semi) : raw;
+    const n = parseInt(numPart, 10);
+    if (!Number.isFinite(n)) return null;
+    const note = semi >= 0 ? raw.slice(semi + 1).trim().slice(0, 160) : '';
+    return { score: Math.max(0, Math.min(10, n)), note };
+  };
+  const parseBreakdown = (suffix) => {
+    const out = {};
+    for (const c of JUDGE_CATEGORIES) {
+      const parsed = parseCategory(findLine(`${c.key}${suffix}:`));
+      if (!parsed) return null; // all four or nothing
+      out[c.key] = parsed;
+    }
+    return out;
+  };
+  const breakdownX = parseBreakdown('x');
+  const breakdownO = parseBreakdown('o');
+
+  // Overall = weighted categories, with the model's hard rules kept on top:
+  // a model score of 0-2 is a cap (silent / wrong side / trolling) and wins;
+  // otherwise anyone the model scored >= 3 keeps the floor of 3.
+  const weighted = (b) =>
+    Math.round(JUDGE_CATEGORIES.reduce((sum, c) => sum + c.weight * b[c.key].score, 0));
+  const combine = (b, modelScore) => {
+    if (!b) return modelScore;
+    if (modelScore <= 2) return modelScore;
+    return Math.max(3, Math.min(10, weighted(b)));
+  };
+  const scoreX = combine(breakdownX, modelScoreX);
+  const scoreO = combine(breakdownO, modelScoreO);
+  if (scoreX !== modelScoreX || scoreO !== modelScoreO) {
+    console.log(`[judge] overall recomputed from categories: X ${modelScoreX}->${scoreX}, O ${modelScoreO}->${scoreO}`);
+  }
 
   // The Points lines are the judge's working notes (distinct arguments per
   // side). They never reach the client; log them so fairness can be audited.
@@ -223,7 +282,13 @@ function parseJudgeReply(content) {
   else if (scoreO > scoreX) winner = 'O';
   else winner = 'tie';
 
-  return { winner, scoreX, scoreO, review };
+  return {
+    winner,
+    scoreX,
+    scoreO,
+    review,
+    ...(breakdownX && breakdownO ? { breakdownX, breakdownO } : {}),
+  };
 }
 
 // How long the loser-of-the-lock will poll for the winner's published
