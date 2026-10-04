@@ -6,7 +6,19 @@
 const express = require('express');
 const { getDb } = require('./firestoreClient');
 
-const LIMIT = 10;
+// Default stays at 10 so older app builds (which render every entry they
+// receive) are unaffected; newer builds ask for `?limit=100` and page locally.
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 100;
+// Extra rows pulled so internal test accounts can be dropped without
+// shrinking the board below the requested size.
+const TEST_ACCOUNT_SLACK = 20;
+
+function parseLimit(raw) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_LIMIT;
+  return Math.min(n, MAX_LIMIT);
+}
 
 function nameFromProfile(profile, userData, fallback) {
   if (profile && typeof profile === 'object') {
@@ -32,7 +44,7 @@ function profileImageFromProfile(data) {
   return typeof url === 'string' && url.trim().length > 0 ? url.trim() : null;
 }
 
-async function fetchTopDebaters() {
+async function fetchTopDebaters(limit = DEFAULT_LIMIT) {
   const db = getDb();
   if (!db) {
     const err = new Error('Firestore unavailable');
@@ -40,13 +52,15 @@ async function fetchTopDebaters() {
     throw err;
   }
 
+  const size = parseLimit(limit);
+
   // Over-fetch so that internal test accounts (users/{uid}.isTestAccount)
-  // can be dropped without shrinking the board below LIMIT. Test accounts
+  // can be dropped without shrinking the board below `size`. Test accounts
   // are never prize-eligible, so they must not appear in prize positions.
   const usersSnap = await db
     .collection('users')
     .orderBy('rankTokens', 'desc')
-    .limit(LIMIT * 3)
+    .limit(size + TEST_ACCOUNT_SLACK)
     .get();
 
   if (usersSnap.empty) return [];
@@ -56,7 +70,7 @@ async function fetchTopDebaters() {
 
   const eligibleDocs = usersSnap.docs
     .filter((doc) => (doc.data() || {}).isTestAccount !== true)
-    .slice(0, LIMIT);
+    .slice(0, size);
 
   eligibleDocs.forEach((doc, index) => {
     const data = doc.data() || {};
@@ -103,9 +117,9 @@ async function fetchTopDebaters() {
 function makeRouter() {
   const router = express.Router();
 
-  router.get('/leaderboard', async (_req, res) => {
+  router.get('/leaderboard', async (req, res) => {
     try {
-      const entries = await fetchTopDebaters();
+      const entries = await fetchTopDebaters(req.query.limit);
       return res.json({ entries });
     } catch (err) {
       const status = err.status && err.status >= 400 && err.status < 600 ? err.status : 500;
