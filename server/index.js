@@ -67,7 +67,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'leaderboard-rank-1';
+const SERVER_VERSION = 'side-select-1';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -101,11 +101,14 @@ io.on('connection', async (socket) => {
   const hs = socket.handshake.query || {};
   const appVersion = typeof hs.appVersion === 'string' ? hs.appVersion.slice(0, 20) : null;
   const serverTurns = hs.serverTurns === '1' || hs.serverTurns === 'true';
-  store.setClientCaps(userId, { appVersion, serverTurns, at: Date.now() }).catch((err) => {
+  // Private Support/Oppose selection lobby (see debateLobby.js). Only builds
+  // that handle lobbyCreated for topic debates send this.
+  const sideSelect = hs.sideSelect === '1' || hs.sideSelect === 'true';
+  store.setClientCaps(userId, { appVersion, serverTurns, sideSelect, at: Date.now() }).catch((err) => {
     console.error('[connection] setClientCaps failed:', err.message);
   });
 
-  console.log(`Player connected: socket.id=${socket.id}, userId=${userId} app=${appVersion || 'legacy'} serverTurns=${serverTurns}`);
+  console.log(`Player connected: socket.id=${socket.id}, userId=${userId} app=${appVersion || 'legacy'} serverTurns=${serverTurns} sideSelect=${sideSelect}`);
 
   // Every socket joins this user's personal room. All cross-instance
   // emits to a specific user go through `io.to(userRoom(uid)).emit(...)`,

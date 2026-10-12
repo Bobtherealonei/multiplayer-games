@@ -125,6 +125,10 @@ async function processResult({
   startedAt,
   friendly = false,
   aiGame = false,
+  // AI game standing in for a human match (side-select fallback): recorded
+  // as an AI game for the data, but PAID under human-game rules — duration
+  // floor applies and it counts toward the real-person record.
+  aiFallback = false,
   skipDurationCheck = false,
   skipRewardsReason = null,
   // Optional judge verdict details (scores + review) stored alongside the
@@ -147,7 +151,7 @@ async function processResult({
   // AI debate routinely finishes well under the human floor. Collusion isn't
   // possible against the house AI, and a silent player still gets nothing
   // via the no_speech path.
-  const tooShort = !skipDurationCheck && !aiGame &&
+  const tooShort = !skipDurationCheck && (!aiGame || aiFallback) &&
     durationMs !== null && durationMs < MIN_REWARDED_DEBATE_MS;
 
   // Map outcome -> per-uid role.
@@ -188,6 +192,7 @@ async function processResult({
         gameType: gameType || null,
         friendly,
         aiGame,
+        ...(aiFallback ? { aiFallback: true } : {}),
         result: outcome.result,
         winnerId,
         loserId,
@@ -235,8 +240,9 @@ async function processResult({
       };
       // AI matches count in the lifetime totals AND in a separate AI-only
       // counter so the profile can break down AI vs. real-person records
-      // (real = total - ai).
-      if (aiGame) {
+      // (real = total - ai). Side-select fallbacks are presented to the
+      // player as a normal match, so they stay in the real-person column.
+      if (aiGame && !aiFallback) {
         const aiField =
           role === 'win' ? 'aiDebateWins' : role === 'loss' ? 'aiDebateLosses' : 'aiDebateDraws';
         userUpdate[aiField] = FieldValue.increment(1);
@@ -271,6 +277,7 @@ async function processResult({
       gameType: gameType || null,
       friendly,
       aiGame,
+      ...(aiFallback ? { aiFallback: true } : {}),
       result: outcome.result,
       winnerId,
       loserId,
@@ -338,6 +345,7 @@ async function settleJudgedResult(gameId, state, judge) {
     startedAt: state.startedAt,
     friendly: state.isFriendly === true || state.isFriendly === 'true',
     aiGame: state.isAIGame === true || state.isAIGame === 'true',
+    aiFallback: state.aiFallback === true || state.aiFallback === 'true',
     judge: judgeSummary(judge)
   });
 }
@@ -418,6 +426,7 @@ async function processForfeit(gameId, quitterId, { cause = 'left' } = {}) {
       startedAt: state.startedAt,
       friendly: state.isFriendly === true || state.isFriendly === 'true',
       aiGame: state.isAIGame === true || state.isAIGame === 'true',
+      aiFallback: state.aiFallback === true || state.aiFallback === 'true',
       // Ranked forfeits still pay even under the 2-minute anti-farm window.
       skipDurationCheck: !judgedOutcome,
       skipRewardsReason: silent ? 'no_speech' : null,

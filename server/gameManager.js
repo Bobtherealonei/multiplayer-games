@@ -190,6 +190,15 @@ class GameManager {
         serialized.philosopher = gameOptions.philosopher;
       }
     }
+    // Side-select games (see debateLobby.js): never reveal the opponent, so
+    // the human and AI-fallback outcomes look the same to the player.
+    const hiddenOpponent = Boolean(gameOptions.hiddenOpponent);
+    if (hiddenOpponent) serialized.hiddenOpponent = true;
+    if (gameOptions.sideSelect) serialized.sideSelect = true;
+    // AI game that stands in for a human match: judged and paid under
+    // human-game rules (no handicap, duration floor applies, counts as a
+    // real-person result on the profile).
+    if (gameOptions.aiFallback) serialized.aiFallback = true;
     await store.saveGameState(gameId, serialized);
 
     // Ranked topic games: don't rematch this pair for a while. Custom /
@@ -214,7 +223,7 @@ class GameManager {
     }
 
     const aiPersona = gameOptions.aiPersona || serialized.aiPersona;
-    const aiMeta = isAIGame && aiPersona
+    const aiMeta = isAIGame && aiPersona && !hiddenOpponent
       ? {
           isAIOpponent: true,
           opponentName: aiPersona.displayName,
@@ -222,6 +231,7 @@ class GameManager {
           opponentImageURL: aiPersona.imageURL,
         }
       : {};
+    const hiddenMeta = hiddenOpponent ? { hiddenOpponent: true } : {};
 
     // Server-measured ms since the game was created — the client anchors its
     // debate clock to this (skew-free), so backgrounding/reconnecting never
@@ -240,6 +250,7 @@ class GameManager {
         question: game.question,
         clockElapsedMs,
         ...aiMeta,
+        ...hiddenMeta,
       });
     }
     if (player2Id !== AI_OPPONENT_ID) {
@@ -253,6 +264,7 @@ class GameManager {
         opponentPosition: p1Position,
         question: game.question,
         clockElapsedMs,
+        ...hiddenMeta,
       });
     }
 
@@ -405,9 +417,15 @@ class GameManager {
       gameType,
       customPayload,
       matchPayload,
-      { isAIGame: true, aiPersona, philosopher: philosopherPersona ? philosopher : null }
+      {
+        isAIGame: true,
+        aiPersona,
+        philosopher: philosopherPersona ? philosopher : null,
+        hiddenOpponent: Boolean(options.hiddenOpponent),
+        aiFallback: Boolean(options.aiFallback),
+      }
     );
-    console.log(`[gameManager] AI game created gameId=${gameId} human=${humanId} type=${gameType} philosopher=${philosopher || 'none'}`);
+    console.log(`[gameManager] AI game created gameId=${gameId} human=${humanId} type=${gameType} philosopher=${philosopher || 'none'}${options.aiFallback ? ' (side-select fallback)' : ''}`);
     return gameId;
   }
 
@@ -471,6 +489,9 @@ class GameManager {
           player2Position: state.player2Position || null,
           isAIGame: Boolean(state.isAIGame),
           aiPersona: state.aiPersona || null,
+          sideSelect: state.sideSelect === true || state.sideSelect === 'true',
+          hiddenOpponent: state.hiddenOpponent === true || state.hiddenOpponent === 'true',
+          aiFallback: state.aiFallback === true || state.aiFallback === 'true',
           messages: chatLog.map((m) => ({ symbol: m?.symbol || null, text: m?.text || '' })),
           messageCount: chatLog.length,
           status: 'ended',
@@ -1142,7 +1163,8 @@ class GameManager {
           turnIndex: e.turnIndex,
           elapsedMs: Math.max(0, (Number(e.atMs) || createdAtMs) - createdAtMs)
         }));
-      const aiPersona = state.aiPersona || null;
+      const hidden = state.hiddenOpponent === true || state.hiddenOpponent === 'true';
+      const aiPersona = hidden ? null : (state.aiPersona || null);
       socket.emit('gameFound', {
         gameId,
         symbol,
@@ -1164,6 +1186,7 @@ class GameManager {
               opponentImageURL: aiPersona.imageURL,
             }
           : {}),
+        ...(hidden ? { hiddenOpponent: true } : {}),
       });
       socket.emit('gameState', {
         player1Symbol: game.player1Symbol,

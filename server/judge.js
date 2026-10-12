@@ -355,7 +355,11 @@ async function resolvePlayerNames(state, rawNames) {
     O: sanitizeName(rawNames && rawNames.O, ''),
   };
 
-  if (state) {
+  // Hidden-opponent games (side-select): keep the review anonymous so it
+  // can't leak who — or what — the other side was.
+  const hidden = state && (state.hiddenOpponent === true || state.hiddenOpponent === 'true');
+
+  if (state && !hidden) {
     const db = getDb();
     const resolve = async (uid) => {
       if (uid === AI_OPPONENT_ID) return aiOpponentName(state);
@@ -371,8 +375,8 @@ async function resolvePlayerNames(state, rawNames) {
     if (nameO) names.O = sanitizeName(nameO, names.O);
   }
 
-  if (!names.X) names.X = 'Player 1';
-  if (!names.O) names.O = 'Player 2';
+  if (hidden || !names.X) names.X = 'Player 1';
+  if (hidden || !names.O) names.O = 'Player 2';
   return names;
 }
 
@@ -620,6 +624,9 @@ function applyAIGameHandicap(result, state) {
   if (!result || !state) return result;
   // Both knobs off: the judge's verdict is final, untouched.
   if (AI_GAME_HUMAN_BONUS === 0 && !AI_GAME_TIE_TO_HUMAN) return result;
+  // AI standing in for a human match (side-select fallback) is judged like a
+  // human game — no tilt, or the rewards would give the disguise away.
+  if (state.aiFallback === true || state.aiFallback === 'true') return result;
   const humanSymbol = state.player1Id === AI_OPPONENT_ID ? 'O'
     : state.player2Id === AI_OPPONENT_ID ? 'X'
     : null;

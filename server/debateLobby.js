@@ -1,9 +1,18 @@
-// debateLobby.js — pair players, pick a question, randomly assign sides, start.
+// debateLobby.js — pair players, pick a question, assign sides, start.
+//
+// Two paths:
+//   • Default: sides are assigned at random and the debate starts at once.
+//   • Side-select (gated, see experiments.js): both players privately pick
+//     Support/Oppose on the same question. Opposite picks → human debate.
+//     Same pick → each player gets an AI debate on the side they chose, with
+//     the same question. In both cases the opponent's identity is hidden so
+//     the two outcomes are indistinguishable to the player.
 
 const store = require('./gameStore');
 const { getDb, getAdmin } = require('./firestoreClient');
 const { pickNextQuestionForPair } = require('./questionPicker');
 const { recordQuestionShown } = require('./questionHistory');
+const { sideSelectEnabledFor } = require('./experiments');
 
 const COLLECTION = 'debateLobbies';
 const SELECTION_MS = Number(process.env.LOBBY_SELECTION_MS) || 20 * 1000;
@@ -35,15 +44,39 @@ class DebateLobbyManager {
     return { [player1Id]: 'oppose', [player2Id]: 'support' };
   }
 
+  async _bothSideSelectEligible(player1Id, player2Id) {
+    try {
+      const [caps1, caps2] = await Promise.all([
+        store.getClientCaps(player1Id),
+        store.getClientCaps(player2Id)
+      ]);
+      const [ok1, ok2] = await Promise.all([
+        sideSelectEnabledFor(player1Id, caps1),
+        sideSelectEnabledFor(player2Id, caps2)
+      ]);
+      return ok1 && ok2;
+    } catch (err) {
+      console.warn('[lobby] side-select eligibility check failed:', err.message);
+      return false;
+    }
+  }
+
   /**
-   * Match two players, pick a question, assign random sides, and start the debate.
+   * Match two players and pick a question. If both are in the side-select
+   * experiment, open a private selection lobby; otherwise assign random sides
+   * and start the debate immediately.
    */
   async createLobby(player1Id, player2Id, gameType) {
     const question = await pickNextQuestionForPair([player1Id, player2Id], gameType);
-    const selections = this._randomSelections(player1Id, player2Id);
 
     recordQuestionShown(player1Id, question.questionId).catch(() => {});
     recordQuestionShown(player2Id, question.questionId).catch(() => {});
+
+    if (await this._bothSideSelectEligible(player1Id, player2Id)) {
+      return this._createSelectionLobby(player1Id, player2Id, gameType, question);
+    }
+
+    const selections = this._randomSelections(player1Id, player2Id);
 
     let supportUserId = null;
     let opposeUserId = null;
@@ -76,6 +109,62 @@ class DebateLobbyManager {
       `[lobby] matched gameId=${gameId} p1=${player1Id} p2=${player2Id} questionId=${question.questionId} sides=${JSON.stringify(selections)}`
     );
     return gameId;
+  }
+
+  /**
+   * Side-select path: persist a lobby both players can see, push the shared
+   * question, and wait for private Support/Oppose picks (or the deadline).
+   */
+  async _createSelectionLobby(player1Id, player2Id, gameType, question) {
+    const db = getDb();
+    if (!db) throw new Error('Firestore unavailable');
+
+    const lobbyId = `lobby_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const selectionDeadline = Date.now() + SELECTION_MS;
+    const admin = getAdmin();
+
+    const lobbyDoc = {
+      lobbyId,
+      playerIds: [player1Id, player2Id],
+      questionId: question.questionId || null,
+      questionText: question.questionText,
+      categoryId: gameType,
+      topicTitle: question.topicTitle || null,
+      debateAmmo: question.ammo || null,
+      selectionCount: 0,
+      status: 'waitingForSelections',
+      sideSelect: true,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      selectionDeadline,
+      debateId: null
+    };
+    await db.collection(COLLECTION).doc(lobbyId).set(lobbyDoc);
+
+    await Promise.all([
+      store.setPlayerLobby(player1Id, lobbyId),
+      store.setPlayerLobby(player2Id, lobbyId),
+      store.clearLobbySelections(lobbyId)
+    ]);
+
+    // No opponent identity in this payload on purpose.
+    const payload = {
+      lobbyId,
+      questionId: question.questionId || null,
+      questionText: question.questionText,
+      categoryId: gameType,
+      topicTitle: question.topicTitle || null,
+      selectionDeadline,
+      status: 'waitingForSelections'
+    };
+    this.io.to(userRoom(player1Id)).emit('lobbyCreated', payload);
+    this.io.to(userRoom(player2Id)).emit('lobbyCreated', payload);
+
+    this._scheduleSelectionTimeout(lobbyId, player1Id, player2Id, gameType, selectionDeadline);
+
+    console.log(
+      `[lobby] side-select lobby created lobbyId=${lobbyId} p1=${player1Id} p2=${player2Id} questionId=${question.questionId}`
+    );
+    return lobbyId;
   }
 
   _scheduleSelectionTimeout(lobbyId, player1Id, player2Id, gameType, selectionDeadline) {
@@ -158,7 +247,7 @@ class DebateLobbyManager {
     this._clearSelectionTimer(lobbyId);
 
     if (pos1 === pos2) {
-      await this._handleSamePosition(lobbyId, lobbyData, player1Id, player2Id);
+      await this._handleSamePosition(lobbyId, lobbyData, player1Id, player2Id, selections);
       return;
     }
 
@@ -212,7 +301,10 @@ class DebateLobbyManager {
         opposeUserId,
         gameType,
         null,
-        matchPayload
+        matchPayload,
+        // Side-select games never reveal who the opponent is — this keeps the
+        // human and AI-fallback outcomes indistinguishable.
+        { hiddenOpponent: true, sideSelect: true }
       );
     } catch (err) {
       console.error('[lobby] createGame failed:', err.message);
@@ -245,33 +337,80 @@ class DebateLobbyManager {
     return gameId;
   }
 
-  async _handleSamePosition(lobbyId, lobbyData, player1Id, player2Id) {
+  /**
+   * Both players picked the same side. Each gets an AI debate on the side
+   * they chose, on the same question they were shown. From the player's
+   * point of view this looks exactly like the human path (lobbyResolved →
+   * gameFound with a hidden opponent). The AI game pays like a human game.
+   */
+  async _handleSamePosition(lobbyId, lobbyData, player1Id, player2Id, selections) {
     const db = getDb();
     const ref = db.collection(COLLECTION).doc(lobbyId);
     const gameType = lobbyData.categoryId;
 
-    await ref.update({ status: 'samePosition' });
+    const claimed = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return false;
+      const cur = snap.data();
+      if (cur.status !== 'waitingForSelections') return false;
+      tx.update(ref, { status: 'samePositionAI' });
+      return true;
+    });
+    if (!claimed) return;
 
     await Promise.all([
       store.clearPlayerLobby(player1Id),
       store.clearPlayerLobby(player2Id),
       store.clearLobbySelections(lobbyId),
+      // Don't re-pair these two for a while — they'd likely agree again.
       store.addAvoidPair(player1Id, player2Id)
     ]);
 
-    const message = 'You both chose the same position. Finding another opponent…';
+    const preview = {
+      question: lobbyData.questionText,
+      questionId: lobbyData.questionId || null,
+      topicTitle: lobbyData.topicTitle || null,
+      ammo: lobbyData.debateAmmo || null,
+      categoryId: gameType
+    };
+
+    const gameIds = {};
     for (const uid of [player1Id, player2Id]) {
-      this.io.to(userRoom(uid)).emit('lobbyResolved', {
-        lobbyId,
-        result: 'samePosition',
-        message
-      });
+      const side = selections[uid] === 'oppose' ? 'oppose' : 'support';
+      try {
+        gameIds[uid] = await this.gameManager.createAIGame(uid, gameType, {
+          side,
+          preview,
+          hiddenOpponent: true,
+          aiFallback: true
+        });
+        this.io.to(userRoom(uid)).emit('lobbyResolved', {
+          lobbyId,
+          result: 'debateStarted',
+          debateId: gameIds[uid],
+          myPosition: side,
+          opponentPosition: side === 'support' ? 'oppose' : 'support'
+        });
+      } catch (err) {
+        console.error(`[lobby] AI fallback failed for ${uid}:`, err.message);
+        this.io.to(userRoom(uid)).emit('lobbyResolved', {
+          lobbyId,
+          result: 'cancelled',
+          message: 'Could not start the debate. Returning to matchmaking…'
+        });
+        await this.matchmaking.requeuePlayer(uid, gameType).catch(() => {});
+      }
     }
 
-    await this.matchmaking.requeuePlayer(player1Id, gameType);
-    await this.matchmaking.requeuePlayer(player2Id, gameType);
+    await ref.update({
+      status: 'samePositionAI',
+      aiDebateIds: gameIds,
+      resolvedAt: getAdmin().firestore.FieldValue.serverTimestamp()
+    });
 
-    console.log(`[lobby] same position lobbyId=${lobbyId} — re-queued both`);
+    console.log(
+      `[lobby] same position lobbyId=${lobbyId} side=${selections[player1Id]} → AI debates ${JSON.stringify(gameIds)}`
+    );
   }
 
   async _handleSelectionTimeout(lobbyId, player1Id, player2Id, gameType) {
@@ -297,22 +436,54 @@ class DebateLobbyManager {
       store.clearLobbySelections(lobbyId)
     ]);
 
+    // Exactly one player picked: start them against the AI on the side they
+    // chose (same hidden-opponent treatment), so a slow opponent never costs
+    // them the debate. The no-show is counted as an abandon.
+    const soloFallback = async (chooserId, noShowId) => {
+      const side = selections[chooserId] === 'oppose' ? 'oppose' : 'support';
+      try {
+        const gameId = await this.gameManager.createAIGame(chooserId, gameType, {
+          side,
+          preview: {
+            question: data.questionText,
+            questionId: data.questionId || null,
+            topicTitle: data.topicTitle || null,
+            ammo: data.debateAmmo || null,
+            categoryId: gameType
+          },
+          hiddenOpponent: true,
+          aiFallback: true
+        });
+        this.io.to(userRoom(chooserId)).emit('lobbyResolved', {
+          lobbyId,
+          result: 'debateStarted',
+          debateId: gameId,
+          myPosition: side,
+          opponentPosition: side === 'support' ? 'oppose' : 'support'
+        });
+        await ref.update({ status: 'timedOutAI', aiDebateIds: { [chooserId]: gameId } });
+      } catch (err) {
+        console.error(`[lobby] timeout AI fallback failed for ${chooserId}:`, err.message);
+        this.io.to(userRoom(chooserId)).emit('lobbyResolved', {
+          lobbyId,
+          result: 'timedOut',
+          message: 'Your opponent did not choose in time. Finding another opponent…'
+        });
+        await this.matchmaking.requeuePlayer(chooserId, gameType);
+      }
+      // Tell the no-show their lobby is over so the client leaves the picker.
+      this.io.to(userRoom(noShowId)).emit('lobbyResolved', {
+        lobbyId,
+        result: 'timedOut',
+        message: 'You did not choose a side in time.'
+      });
+      await store.incrementLobbyAbandon(noShowId);
+    };
+
     if (p1Submitted && !p2Submitted) {
-      this.io.to(userRoom(player1Id)).emit('lobbyResolved', {
-        lobbyId,
-        result: 'timedOut',
-        message: 'Your opponent did not choose in time. Finding another opponent…'
-      });
-      await this.matchmaking.requeuePlayer(player1Id, gameType);
-      await store.incrementLobbyAbandon(player2Id);
+      await soloFallback(player1Id, player2Id);
     } else if (p2Submitted && !p1Submitted) {
-      this.io.to(userRoom(player2Id)).emit('lobbyResolved', {
-        lobbyId,
-        result: 'timedOut',
-        message: 'Your opponent did not choose in time. Finding another opponent…'
-      });
-      await this.matchmaking.requeuePlayer(player2Id, gameType);
-      await store.incrementLobbyAbandon(player1Id);
+      await soloFallback(player2Id, player1Id);
     } else {
       for (const uid of [player1Id, player2Id]) {
         this.io.to(userRoom(uid)).emit('lobbyResolved', {
@@ -354,6 +525,7 @@ class DebateLobbyManager {
     const gameType = data.categoryId;
 
     this._clearSelectionTimer(lobbyId);
+    const selections = await store.getLobbySelections(lobbyId);
     await ref.update({ status: 'cancelled' });
     await store.clearPlayerLobby(userId);
     if (otherId) await store.clearPlayerLobby(otherId);
@@ -361,7 +533,6 @@ class DebateLobbyManager {
     await store.incrementLobbyAbandon(userId);
 
     if (otherId) {
-      const selections = await store.getLobbySelections(lobbyId);
       if (selections[otherId]) {
         this.io.to(userRoom(otherId)).emit('lobbyResolved', {
           lobbyId,
