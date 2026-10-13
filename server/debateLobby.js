@@ -5,8 +5,10 @@
 //   • Side-select (gated, see experiments.js): both players privately pick
 //     Support/Oppose on the same question. Opposite picks → human debate.
 //     Same pick → each player gets an AI debate on the side they chose, with
-//     the same question. In both cases the opponent's identity is hidden so
-//     the two outcomes are indistinguishable to the player.
+//     the same question. The opponent is only withheld until sides are
+//     chosen; the debate itself shows a normal opponent card — the human's
+//     real profile, or (AI fallback) a random human-looking persona — so the
+//     two outcomes look alike.
 
 const store = require('./gameStore');
 const { getDb, getAdmin } = require('./firestoreClient');
@@ -302,9 +304,9 @@ class DebateLobbyManager {
         gameType,
         null,
         matchPayload,
-        // Side-select games never reveal who the opponent is — this keeps the
-        // human and AI-fallback outcomes indistinguishable.
-        { hiddenOpponent: true, sideSelect: true }
+        // Opponent identity was withheld during side selection only; the
+        // debate shows the real profile like any other human match.
+        { hiddenOpponent: false, sideSelect: true }
       );
     } catch (err) {
       console.error('[lobby] createGame failed:', err.message);
@@ -340,8 +342,9 @@ class DebateLobbyManager {
   /**
    * Both players picked the same side. Each gets an AI debate on the side
    * they chose, on the same question they were shown. From the player's
-   * point of view this looks exactly like the human path (lobbyResolved →
-   * gameFound with a hidden opponent). The AI game pays like a human game.
+   * point of view this looks like the human path (lobbyResolved → gameFound
+   * with a named opponent — here a random human-looking AI persona with a
+   * photo). The AI game pays like a human game.
    */
   async _handleSamePosition(lobbyId, lobbyData, player1Id, player2Id, selections) {
     const db = getDb();
@@ -381,7 +384,7 @@ class DebateLobbyManager {
         gameIds[uid] = await this.gameManager.createAIGame(uid, gameType, {
           side,
           preview,
-          hiddenOpponent: true,
+          hiddenOpponent: false,
           aiFallback: true
         });
         this.io.to(userRoom(uid)).emit('lobbyResolved', {
@@ -437,7 +440,7 @@ class DebateLobbyManager {
     ]);
 
     // Exactly one player picked: start them against the AI on the side they
-    // chose (same hidden-opponent treatment), so a slow opponent never costs
+    // chose (same named-persona treatment), so a slow opponent never costs
     // them the debate. The no-show is counted as an abandon.
     const soloFallback = async (chooserId, noShowId) => {
       const side = selections[chooserId] === 'oppose' ? 'oppose' : 'support';
@@ -451,7 +454,7 @@ class DebateLobbyManager {
             ammo: data.debateAmmo || null,
             categoryId: gameType
           },
-          hiddenOpponent: true,
+          hiddenOpponent: false,
           aiFallback: true
         });
         this.io.to(userRoom(chooserId)).emit('lobbyResolved', {
