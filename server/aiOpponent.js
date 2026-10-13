@@ -184,8 +184,31 @@ function dropTruncatedTail(text) {
   return sentences.slice(0, -1).join(' ').trim();
 }
 
+// How long a casual-persona reply should be. `quick` is the default
+// (regular AI debates: answer ~2 s into the turn). The others are for the
+// side-select AI stand-in, which replies on a human-like delay — the longer
+// it "typed", the more it says (see gameManager.pickHumanPacing).
+const REPLY_LENGTHS = {
+  quick: {
+    sentences: 2, maxChars: 220, maxTokens: 160, hint: '1-2 sentences',
+    prompt: 'Reply in 1-2 sentences (~20-35 words). Punchy and quick — this is chat, not an essay.',
+  },
+  short: {
+    sentences: 2, maxChars: 300, maxTokens: 200, hint: '2 sentences',
+    prompt: 'Reply in 2 full sentences (~30-45 words). Make a real point and back it with one concrete detail, number, or example — never a one-liner.',
+  },
+  medium: {
+    sentences: 3, maxChars: 430, maxTokens: 260, hint: '2-3 sentences',
+    prompt: 'Reply in 2-3 sentences (~45-65 words). Answer their point, then back yours with a specific fact, number, or real example and say why it matters.',
+  },
+  long: {
+    sentences: 4, maxChars: 580, maxTokens: 340, hint: '3-4 sentences',
+    prompt: 'Reply in 3-4 sentences (~65-90 words). Answer their point properly, then build your case with a specific fact, number, or real example and spell out the consequence.',
+  },
+};
+
 /** Keep replies chat-sized: a substantial turn, but never a paragraph dump. */
-function trimToHumanReply(text) {
+function trimToHumanReply(text, { maxSentences = 2, maxChars = 220 } = {}) {
   if (!text || typeof text !== 'string') return text;
 
   let cleaned = text
@@ -196,11 +219,10 @@ function trimToHumanReply(text) {
   if (!cleaned) return cleaned;
 
   const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
-  cleaned = sentences.slice(0, 2).join(' ').trim();
+  cleaned = sentences.slice(0, maxSentences).join(' ').trim();
 
   // Over-length replies get cut at the last sentence boundary inside the cap
   // when possible — a word-boundary chop reads like the message broke off.
-  const maxChars = 220;
   if (cleaned.length > maxChars) {
     const cut = cleaned.slice(0, maxChars);
     const lastEnd = Math.max(cut.lastIndexOf('.'), cut.lastIndexOf('!'), cut.lastIndexOf('?'));
@@ -220,9 +242,12 @@ function trimToSentences(text, maxSentences = 2) {
 }
 
 /** Messy mobile-chat tone: normal words, imperfect punctuation. */
-function casualizeReply(text) {
-  let s = trimToHumanReply(text);
+function casualizeReply(text, { maxSentences = 2, maxChars = 220 } = {}) {
+  let s = trimToHumanReply(text, { maxSentences, maxChars });
   if (!s) return s;
+  // Longer replies keep their sentence breaks (a 3-4 sentence run-on with
+  // no punctuation reads like a bot, not a person typing for 40 seconds).
+  const keepSentenceBreaks = maxSentences > 2;
 
   s = s
     .replace(/[—–]/g, ' ')
@@ -245,11 +270,14 @@ function casualizeReply(text) {
 
   // No polished ending punctuation — keep ? or ! if it's there, drop periods.
   s = s.replace(/\.+$/g, '');
-  s = s.replace(/\.\s+/g, ' ');
+  if (!keepSentenceBreaks) {
+    s = s.replace(/\.\s+/g, ' ');
+  }
 
-  // Light comma cleanup: avoid essay-style comma stacks.
+  // Light comma cleanup: avoid essay-style comma stacks (short replies
+  // only — a multi-sentence message legitimately has a few).
   const commaCount = (s.match(/,/g) || []).length;
-  if (commaCount > 1) {
+  if (!keepSentenceBreaks && commaCount > 1) {
     let seen = 0;
     s = s.replace(/,/g, () => {
       seen += 1;
@@ -270,9 +298,11 @@ async function generateDebateReply({
   philosopher,
   ammo,
   aiSymbol,
+  lengthProfile = 'quick',
 }) {
   const apiKey = process.env.OPENAI_API_KEY;
   const philo = philosopher ? getPhilosopher(philosopher) : null;
+  const len = REPLY_LENGTHS[lengthProfile] || REPLY_LENGTHS.quick;
   if (!apiKey) {
     // Philosophers have no canned fallback — return empty so we just stay quiet
     // rather than break character with a casual one-liner.
@@ -330,7 +360,7 @@ async function generateDebateReply({
         'Stay on the exact debate statement. Do not switch to a new sub-topic unless the opponent did. Follow the thread of the conversation, not a script.',
         'Never repeat an argument YOU already made — check the lines marked YOU above. Saying the same idea in new words still counts as repeating. Every reply must bring a genuinely different angle: a different reason, a specific example, a consequence, or a comparison you have not used yet.',
         'If the opponent half-concedes ("its a risk but...", "sure but...", "fine but..."), call out the concession and push on it instead of restating your point.',
-        'Reply in 1-2 sentences (~20-35 words). Punchy and quick — this is chat, not an essay.',
+        len.prompt,
         'Write like real chat: casual, plain words, imperfect grammar is fine. Contractions always (dont, cant, im, youre, its). Lowercase is fine.',
         'Never open with "yeah but", "ok but", "i mean", "nah", "fair but" or any agree-then-pivot filler. Start straight in on the argument. Vary how you open.',
         'Skip fancy words (nevertheless, furthermore, consequently, utilize, individuals).',
@@ -348,19 +378,19 @@ async function generateDebateReply({
         theirLatest
           ? `\nThe opponent's message(s) since you last spoke:\n"${theirLatest}"`
           : '\nThe opponent said nothing since you last spoke.',
-        `\nIt's your turn. Answer their latest point head-on first, then push your ${aiPosition || 'own'} case with ONE new argument about the statement itself (1-2 sentences). Do not repeat anything from your YOU lines.`,
+        `\nIt's your turn. Answer their latest point head-on first, then push your ${aiPosition || 'own'} case with ONE new argument about the statement itself (${len.hint}). Do not repeat anything from your YOU lines.`,
       ].join('\n')
     : philo
     ? `Open the debate on this modern statement in 2 sentences, in your own voice: "${question}"`
-    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the statement (1-2 sentences).`;
+    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the statement (${len.hint}).`;
 
   const request = {
     model: MODEL,
     temperature: philo ? 0.8 : 0.8,
     // Generous headroom on purpose: reply LENGTH is controlled by the
-    // prompt + the 2-sentence trim below. A tight cap here made OpenAI
+    // prompt + the sentence trim below. A tight cap here made OpenAI
     // hard-truncate replies mid-sentence (finish_reason 'length').
-    max_tokens: philo ? 220 : 160,
+    max_tokens: philo ? 220 : len.maxTokens,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: userContent },
@@ -376,7 +406,7 @@ async function generateDebateReply({
       // Philosophers keep their eloquent voice — don't casualize them, but hard
       // cap at 2 sentences so replies stay chat-sized.
       if (philo) return trimToSentences(text, 2);
-      const casual = casualizeReply(text);
+      const casual = casualizeReply(text, { maxSentences: len.sentences, maxChars: len.maxChars });
       if (casual) return casual;
     } catch (err) {
       console.error(`[aiOpponent] attempt ${attempt} failed: ${err.message}`);

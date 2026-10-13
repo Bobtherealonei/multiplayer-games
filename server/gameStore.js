@@ -636,6 +636,27 @@ async function releaseJudgeLock(gameId) {
   await client.del(`judge-lock:${gameId}`);
 }
 
+// ── AI reply claims ─────────────────────────────────────────────────────
+// One AI reply per (game, turn), across instances and across the human-like
+// delay the side-select stand-in waits before answering. Cleared on failure
+// so a retry request can try again.
+const AI_REPLY_CLAIM_TTL_SECONDS = 120;
+
+async function tryClaimAIReply(gameId, turnIndex) {
+  const res = await client.set(
+    `ai-reply:${gameId}:${turnIndex}`,
+    '1',
+    'NX',
+    'EX',
+    AI_REPLY_CLAIM_TTL_SECONDS
+  );
+  return res === 'OK';
+}
+
+async function releaseAIReplyClaim(gameId, turnIndex) {
+  await client.del(`ai-reply:${gameId}:${turnIndex}`);
+}
+
 // ── Client capabilities ─────────────────────────────────────────────────
 // What the user's current app build supports, recorded at socket connect
 // (from the handshake) so game creation on ANY instance can read it.
@@ -723,6 +744,8 @@ module.exports = {
   setJudgeResult,
   tryAcquireJudgeLock,
   releaseJudgeLock,
+  tryClaimAIReply,
+  releaseAIReplyClaim,
   isJudgeInProgress,
   // client capabilities
   setClientCaps,

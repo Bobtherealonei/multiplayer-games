@@ -78,6 +78,39 @@ function pickRandomAITopicType() {
 function userRoom(userId) { return `user:${userId}`; }
 function gameRoom(gameId) { return `game:${gameId}`; }
 
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
+// The client asks for the AI's reply this long into the AI's turn
+// (DebateTopicView.aiThinkSeconds), so "N seconds into the turn" on the
+// server means waiting N minus this after the request arrives.
+const AI_REQUEST_LEAD_MS = 2000;
+// Human-like reply window for the side-select stand-in, in seconds into its
+// turn. Capped under the turn length so the message always lands with time
+// left on the AI's clock.
+const HUMAN_PACE_MIN_SECONDS = 20;
+const HUMAN_PACE_MAX_SECONDS = 50;
+
+/**
+ * When, and how much, the side-select AI stand-in replies. The moment is
+ * random in [20, 50] s into its turn; the length follows it — a quick
+ * answer is a couple of sentences, a long "typing" pause produces 3-4 —
+ * with a little noise so the two aren't mechanically linked. Every profile
+ * is a real argument with a concrete detail (see aiOpponent.REPLY_LENGTHS).
+ */
+function pickHumanPacing(state) {
+  const turnSeconds = Number(state?.turnSeconds) > 0 ? Number(state.turnSeconds) : 60;
+  const maxDelay = Math.max(12, Math.min(HUMAN_PACE_MAX_SECONDS, turnSeconds - 10));
+  const minDelay = Math.min(HUMAN_PACE_MIN_SECONDS, maxDelay - 8);
+  const delaySec = minDelay + Math.random() * (maxDelay - minDelay);
+  const position = (delaySec - minDelay) / Math.max(1, maxDelay - minDelay);
+  const jittered = position + (Math.random() * 0.3 - 0.15);
+  const profile = jittered < 0.34 ? 'short' : jittered < 0.67 ? 'medium' : 'long';
+  return {
+    delayMs: Math.max(0, Math.round(delaySec * 1000 - AI_REQUEST_LEAD_MS)),
+    profile,
+  };
+}
+
 class GameManager {
   constructor(io) {
     this.io = io;
@@ -646,6 +679,20 @@ class GameManager {
     const turnIndex = Number.isInteger(payload?.turnIndex) ? payload.turnIndex : null;
     const repliedTurns = Array.isArray(state.aiRepliedTurns) ? state.aiRepliedTurns : [];
     if (turnIndex !== null && repliedTurns.includes(turnIndex)) return;
+    // Claim this turn before any slow work so a duplicate request (reconnect,
+    // second instance) can't make the AI answer twice — especially during the
+    // human-paced delay below, when aiRepliedTurns isn't set yet.
+    if (turnIndex !== null) {
+      const claimed = await store.tryClaimAIReply(gameId, turnIndex).catch(() => true);
+      if (!claimed) return;
+    }
+
+    // Side-select stand-in (the "opponent" after both players picked the
+    // same side): reply on a human-like clock instead of 2 s in, and say
+    // more the longer it "typed". Philosophers and the regular pick-the-AI
+    // flow keep their quick replies.
+    const humanPaced = state.aiFallback === true || state.aiFallback === 'true';
+    const pacing = humanPaced ? pickHumanPacing(state) : null;
 
     const chatLog = state.chatLog || [];
     const aiSymbol = state.player1Id === AI_OPPONENT_ID ? state.player1Symbol : state.player2Symbol;
@@ -667,11 +714,12 @@ class GameManager {
         : null;
 
     console.log(
-      `[aiOpponent] gameId=${gameId} turn=${turnIndex ?? '?'} side=${aiPosition || '?'} ammoPts=${sideAmmo?.length ?? 0} questionId=${state.questionId || 'none'}`
+      `[aiOpponent] gameId=${gameId} turn=${turnIndex ?? '?'} side=${aiPosition || '?'} ammoPts=${sideAmmo?.length ?? 0} questionId=${state.questionId || 'none'}` +
+        (pacing ? ` paced=${Math.round(pacing.delayMs / 1000)}s length=${pacing.profile}` : '')
     );
 
     try {
-      const reply = await generateDebateReply({
+      const generation = generateDebateReply({
         question: state.question,
         topicTitle: state.topicTitle,
         aiPosition,
@@ -681,12 +729,30 @@ class GameManager {
         humanMessage: humanSinceAI.join('\n'),
         philosopher: state.philosopher || null,
         ammo: sideAmmo,
+        lengthProfile: pacing ? pacing.profile : 'quick',
       });
-      if (!reply) return;
+      // Generate now, but hold the message until the human-like delay has
+      // passed (whichever finishes later).
+      if (pacing) {
+        await Promise.all([generation.catch(() => null), sleepMs(pacing.delayMs)]);
+      }
+      const reply = await generation;
+      if (!reply) {
+        if (turnIndex !== null) await store.releaseAIReplyClaim(gameId, turnIndex).catch(() => {});
+        return;
+      }
+
+      // After the wait the game may be gone (human quit) or have moved on —
+      // re-read before writing so we never resurrect a finished game.
+      const latest = pacing ? await store.loadGameState(gameId) : state;
+      if (!latest) return;
+      const latestLog = Array.isArray(latest.chatLog) ? latest.chatLog : chatLog;
+      const latestReplied = Array.isArray(latest.aiRepliedTurns) ? latest.aiRepliedTurns : repliedTurns;
+      if (turnIndex !== null && latestReplied.includes(turnIndex)) return;
 
       await store.patchGameState(gameId, {
-        chatLog: [...chatLog, { symbol: aiSymbol, text: reply }],
-        aiRepliedTurns: turnIndex !== null ? [...repliedTurns, turnIndex] : repliedTurns,
+        chatLog: [...latestLog, { symbol: aiSymbol, text: reply }],
+        aiRepliedTurns: turnIndex !== null ? [...latestReplied, turnIndex] : latestReplied,
       });
 
       this.io.to(userRoom(playerId)).emit('chatMessage', {
@@ -711,6 +777,7 @@ class GameManager {
       }
     } catch (err) {
       console.error('[gameManager] AI turn reply failed:', err.message);
+      if (turnIndex !== null) await store.releaseAIReplyClaim(gameId, turnIndex).catch(() => {});
     }
   }
 
