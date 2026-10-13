@@ -176,6 +176,13 @@ class GameManager {
     const everyoneServerTurns = caps.every((c) => c && c.serverTurns === true);
     serialized.turnSeconds = everyoneServerTurns ? TURN_SECONDS : LEGACY_TURN_SECONDS;
     serialized.thinkingSeconds = THINKING_SECONDS;
+    // Mirror onto the live instance too: the initial gameState below is built
+    // from `game`, not from Redis. Without this the first broadcast carried
+    // turnSeconds=null (clients fell back to 45 s) and the next re-broadcast
+    // (e.g. Match/Pass after the debate) suddenly switched to 60 s, which
+    // stretched the schedule and re-opened an already-finished debate.
+    game.turnSeconds = serialized.turnSeconds;
+    game.thinkingSeconds = serialized.thinkingSeconds;
     if (!everyoneServerTurns) {
       console.log(`[gameManager] gameId=${gameId} legacy client in game — turnSeconds=${LEGACY_TURN_SECONDS}`);
     }
