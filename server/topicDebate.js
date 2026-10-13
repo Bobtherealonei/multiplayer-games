@@ -329,6 +329,13 @@ class TopicDebate extends Game {
     // null until set; clients fall back to their legacy length.
     this.turnSeconds = null;
     this.thinkingSeconds = null;
+    // Tie-break overtime (judge.js maybeStartOvertime). `overtimeEligible`
+    // is decided at creation from both clients' capabilities; the rest is
+    // set when a judged tie starts the extra round.
+    this.overtimeEligible = false;
+    this.overtimeStartedAt = null;   // ms epoch, server clock
+    this.overtimeChatIndex = null;   // chatLog length when overtime began
+    this.overtimeFirst = null;       // symbol that opens overtime ('P2')
     ensureFreshCache();
   }
 
@@ -442,7 +449,10 @@ class TopicDebate extends Game {
       player2Position: this.player2Position,
       matchRequests: { ...this.matchRequests },
       turnSeconds: this.turnSeconds,
-      thinkingSeconds: this.thinkingSeconds
+      thinkingSeconds: this.thinkingSeconds,
+      overtimeEligible: this.overtimeEligible,
+      overtimeActive: Boolean(this.overtimeStartedAt),
+      overtimeFirst: this.overtimeFirst
     };
   }
 
@@ -483,7 +493,11 @@ class TopicDebate extends Game {
       startedAt: this.startedAt,
       isFriendly: this.isFriendly,
       turnSeconds: this.turnSeconds,
-      thinkingSeconds: this.thinkingSeconds
+      thinkingSeconds: this.thinkingSeconds,
+      overtimeEligible: this.overtimeEligible,
+      overtimeStartedAt: this.overtimeStartedAt,
+      overtimeChatIndex: this.overtimeChatIndex,
+      overtimeFirst: this.overtimeFirst
     };
   }
 
@@ -516,6 +530,11 @@ class TopicDebate extends Game {
     const num = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : null; };
     this.turnSeconds = num(state.turnSeconds);
     this.thinkingSeconds = num(state.thinkingSeconds);
+    const nonNeg = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : null; };
+    this.overtimeEligible = state.overtimeEligible === true || state.overtimeEligible === 'true';
+    this.overtimeStartedAt = num(state.overtimeStartedAt);
+    this.overtimeChatIndex = nonNeg(state.overtimeChatIndex);
+    this.overtimeFirst = state.overtimeFirst === 'P1' || state.overtimeFirst === 'P2' ? state.overtimeFirst : null;
     return this;
   }
 }

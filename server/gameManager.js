@@ -29,6 +29,10 @@ const { getDb, getAdmin } = require('./firestoreClient');
 const store = require('./gameStore');
 const { markQuestionDebated } = require('./questionHistory');
 const rewards = require('./rewards');
+// Final verdict helpers: a regulation tie that's waiting on overtime is NOT
+// a verdict, so leaving mid-overtime is still a forfeit and settlement
+// waits for the overtime pass.
+const { getFinalJudgeResult, isFinalJudgeInProgress } = require('./judge');
 const {
   AI_OPPONENT_ID,
   pickRandomAIPersona,
@@ -183,6 +187,12 @@ class GameManager {
     // stretched the schedule and re-opened an already-finished debate.
     game.turnSeconds = serialized.turnSeconds;
     game.thinkingSeconds = serialized.thinkingSeconds;
+    // Tie-break overtime needs every human's app to understand the extra
+    // turns (`overtimeStarted`), otherwise one phone would lock its chat
+    // while the other keeps debating. AI opponents are driven by the human's
+    // client, so they never block it.
+    serialized.overtimeEligible = caps.every((c) => c && c.overtime === true);
+    game.overtimeEligible = serialized.overtimeEligible;
     if (!everyoneServerTurns) {
       console.log(`[gameManager] gameId=${gameId} legacy client in game — turnSeconds=${LEGACY_TURN_SECONDS}`);
     }
@@ -501,6 +511,10 @@ class GameManager {
           aiFallback: state.aiFallback === true || state.aiFallback === 'true',
           messages: chatLog.map((m) => ({ symbol: m?.symbol || null, text: m?.text || '' })),
           messageCount: chatLog.length,
+          // Tie-break overtime: messages at/after overtimeChatIndex were the
+          // extra round (score lines live on debateResults.judge).
+          overtime: Number(state.overtimeStartedAt) > 0,
+          overtimeChatIndex: Number(state.overtimeStartedAt) > 0 ? (Number(state.overtimeChatIndex) || 0) : null,
           status: 'ended',
           endedAt: FieldValue.serverTimestamp(),
         },
@@ -818,7 +832,7 @@ class GameManager {
   // Pay out a judged debate server-side (idempotent with /debate-result).
   // Returns true if a verdict existed (or arrived within the wait window).
   async _settleJudgedGame(gameId, state) {
-    let judge = await store.getJudgeResult(gameId).catch(() => null);
+    let judge = await getFinalJudgeResult(gameId).catch(() => null);
     if (!judge) {
       const start = Date.now();
       const deadline = start + JUDGE_SETTLE_WAIT_MS;
@@ -827,15 +841,15 @@ class GameManager {
       // few seconds to show up before concluding nobody asked for a verdict.
       const lockGraceUntil = start + 3000;
       while (!judge && Date.now() < deadline) {
-        const judging = await store.isJudgeInProgress(gameId).catch(() => false);
+        const judging = await isFinalJudgeInProgress(gameId);
         if (!judging && Date.now() >= lockGraceUntil) {
           // Not running and nothing cached — either it already failed or it
           // was never requested. One last read in case it landed just now.
-          judge = await store.getJudgeResult(gameId).catch(() => null);
+          judge = await getFinalJudgeResult(gameId).catch(() => null);
           break;
         }
         await new Promise((r) => setTimeout(r, 500));
-        judge = await store.getJudgeResult(gameId).catch(() => null);
+        judge = await getFinalJudgeResult(gameId).catch(() => null);
       }
     }
     if (!judge) return false;
@@ -880,8 +894,8 @@ class GameManager {
     // debate. Previously only the first counted, so a Pass during the
     // "Reviewing the debate…" spinner was processed as a quit: the passer
     // took a forfeit loss and the opponent was kicked out with a win.
-    const judged = await store.getJudgeResult(gameId).catch(() => null);
-    const judging = !judged && (await store.isJudgeInProgress(gameId).catch(() => false));
+    const judged = await getFinalJudgeResult(gameId).catch(() => null);
+    const judging = !judged && (await isFinalJudgeInProgress(gameId));
     const elapsedMs = state && Number(state.startedAt) > 0 ? Date.now() - Number(state.startedAt) : 0;
     const passed = message === PASS_LEAVE_REASON && elapsedMs >= MIN_PASS_ELAPSED_MS;
     if (judged || judging || passed) {
@@ -1102,7 +1116,9 @@ class GameManager {
       });
     }
 
-    const judged = await store.getJudgeResult(gameId).catch(() => null);
+    // Final verdict only — a tie still in overtime is a live debate, and
+    // the grace-expired drop above was a forfeit.
+    const judged = await getFinalJudgeResult(gameId).catch(() => null);
 
     // The dropped player is offline right now, so they can't receive any
     // of this. Leave them a notice so their next connection takes them
@@ -1172,6 +1188,24 @@ class GameManager {
         }));
       const hidden = state.hiddenOpponent === true || state.hiddenOpponent === 'true';
       const aiPersona = hidden ? null : (state.aiPersona || null);
+      // Mid-overtime rejoin: hand back the overtime anchor + the tied
+      // regulation scores so the client rebuilds the 10-turn schedule.
+      let overtimeMeta = {};
+      const otStart = Number(state.overtimeStartedAt);
+      if (Number.isFinite(otStart) && otStart > 0) {
+        const regulation = await store.getJudgeResult(gameId).catch(() => null);
+        overtimeMeta = {
+          overtime: {
+            clockElapsedMs: Math.max(0, Date.now() - otStart),
+            startedElapsedMs: Math.max(0, otStart - (Number(game.createdAt) || otStart)),
+            chatIndex: Number.isFinite(Number(state.overtimeChatIndex)) ? Number(state.overtimeChatIndex) : null,
+            firstSymbol: state.overtimeFirst || game.player2Symbol,
+            regulation: regulation
+              ? { scoreX: regulation.scoreX, scoreO: regulation.scoreO }
+              : null
+          }
+        };
+      }
       socket.emit('gameFound', {
         gameId,
         symbol,
@@ -1194,6 +1228,7 @@ class GameManager {
             }
           : {}),
         ...(hidden ? { hiddenOpponent: true } : {}),
+        ...overtimeMeta,
       });
       socket.emit('gameState', {
         player1Symbol: game.player1Symbol,

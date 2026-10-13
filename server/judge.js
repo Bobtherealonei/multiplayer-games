@@ -40,7 +40,8 @@ const {
 
 const PERPLEXITY_URL = 'https://api.perplexity.ai/chat/completions';
 const PERPLEXITY_MODEL = 'sonar';
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+// Overridable so a local run can point the judge at a mock endpoint.
+const OPENAI_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
 // One judge call per debate decides who wins trophies — worth a full-size
 // model (~$0.004/debate on gpt-4.1 vs ~$0.0003 on gpt-4o-mini). The mini
 // model over-rewarded whichever side quoted more facts, which in AI games
@@ -115,8 +116,22 @@ No Support/Oppose assignments were recorded for this debate. Score each player o
 // to verify claims against live sources; the mini prompt tells it to judge
 // reasoning and only penalize claims that are false per common knowledge —
 // never to guess about very recent events it can't check.
-function buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb) {
+function buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb, overtime = null) {
   const sideBlock = buildSideInstructions(nameX, nameO, stances);
+
+  // Tie-break pass: the regulation turns were already scored (and tied).
+  // Only the two messages tagged OVERTIME are being graded now.
+  const overtimeBlock = overtime
+    ? `
+OVERTIME ROUND — READ THIS FIRST
+- The regulation debate was already judged and ended in a TIE (${overtime.regulation.scoreX}-${overtime.regulation.scoreO}). Each player then got ONE extra message. Those are the transcript lines tagged "OVERTIME".
+- Score ONLY the OVERTIME messages. ScoreX/ScoreO, the four category grades, the Points lines, and the review all describe the overtime messages alone.
+- Untagged (regulation) lines are context only: use them to judge whether an overtime message answers what the opponent actually argued, builds on the debate, or just repeats something already said. Do NOT re-score them and do NOT let the regulation performance pull the overtime score up or down.
+- An overtime message that repeats the player's own earlier points word-for-word adds nothing new — grade it like repetition. One that answers the opponent's strongest regulation point, or lands a new on-side argument, is a strong overtime message.
+- The second overtime speaker had the chance to rebut the first; the first speaker could only rebut regulation. Judge each against what was available to them.
+- Keep the review to 2-3 sentences about the overtime messages only.
+`
+    : '';
 
   const factLine = hasWeb
     ? 'You have access to the live web. Use it ONLY to check specific factual claims a player actually made (a number, a date, an event, a law). Do NOT research the debate topic itself, and never give a player credit because your research agrees with their side — that is taking sides, which is forbidden.'
@@ -128,7 +143,7 @@ function buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb) {
 
   return `You are an impartial AI debate judge. Two players just had a short debate: ${nameX} and ${nameO}. Today is ${todayHuman}. ${factLine}
 ${sideBlock}
-
+${overtimeBlock}
 FORMAT OF THIS DEBATE
 - Players alternate turns. Each turn is a chat message typed under a clock of roughly one minute, so messages are short (often one or two sentences).
 - Judge depth RELATIVE to that format. A short message that makes a clear, relevant, well-reasoned point is a strong message. Do not penalize brevity itself, and do not expect essay-length development.
@@ -398,7 +413,7 @@ function resolvePlayerStances(state, clientStances) {
 
 // ── Shared prompt assembly ─────────────────────────────────────────────────
 
-function buildPrompts(topic, question, safeMessages, names, stances, hasWeb) {
+function buildPrompts(topic, question, safeMessages, names, stances, hasWeb, overtime = null) {
   const nameX = names.X;
   const nameO = names.O;
 
@@ -408,10 +423,16 @@ function buildPrompts(topic, question, safeMessages, names, stances, hasWeb) {
       const label = isO ? nameO : nameX;
       const side = isO ? stances.O : stances.X;
       const sideTag = stanceShortLabel(side);
-      const prefix = sideTag ? `[${label} (${sideTag})]` : `[${label}]`;
+      const otTag = overtime && m.overtime ? 'OVERTIME · ' : '';
+      const prefix = sideTag ? `[${otTag}${label} (${sideTag})]` : `[${otTag}${label}]`;
       return `${prefix}: ${m.text.trim()}`;
     })
     .join('\n');
+
+  const overtimeUserBlock = overtime
+    ? `\nOVERTIME: regulation ended tied ${overtime.regulation.scoreX}-${overtime.regulation.scoreO}. ` +
+      `Score ONLY the messages tagged OVERTIME. Untagged messages are context so you can tell whether an overtime message answers the opponent.\n`
+    : '';
 
   const now = new Date();
   const todayHuman = now.toLocaleDateString('en-US', {
@@ -435,11 +456,12 @@ function buildPrompts(topic, question, safeMessages, names, stances, hasWeb) {
     `Topic: ${topic}\n` +
     `Debate Statement: ${question}\n` +
     sideSummary +
+    overtimeUserBlock +
     `\nThe two debaters are ${nameX} (their score = ScoreX) and ${nameO} (their score = ScoreO).\n\n` +
     `Transcript:\n${transcript}`;
 
   return {
-    system: buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb),
+    system: buildSystemPrompt(todayHuman, nameX, nameO, stances, hasWeb, overtime),
     user: userPrompt,
   };
 }
@@ -449,8 +471,8 @@ function buildPrompts(topic, question, safeMessages, names, stances, hasWeb) {
 // Verified path: Perplexity Sonar with live web search. Tightened vs the old
 // config: low search context (smallest per-request search fee tier), capped
 // output, and the recency filter only when the debate is news-backed.
-async function callSonar(apiKey, topic, question, safeMessages, names, stances, { recency } = {}) {
-  const { system, user } = buildPrompts(topic, question, safeMessages, names, stances, true);
+async function callSonar(apiKey, topic, question, safeMessages, names, stances, { recency, overtime } = {}) {
+  const { system, user } = buildPrompts(topic, question, safeMessages, names, stances, true, overtime);
 
   const body = {
     model: PERPLEXITY_MODEL,
@@ -490,8 +512,8 @@ async function callSonar(apiKey, topic, question, safeMessages, names, stances, 
 
 // Standard path: gpt-4o-mini, transcript only, no web. Same scoring rules and
 // output format, ~1/10th of the verified cost.
-async function callMiniJudge(apiKey, topic, question, safeMessages, names, stances) {
-  const { system, user } = buildPrompts(topic, question, safeMessages, names, stances, false);
+async function callMiniJudge(apiKey, topic, question, safeMessages, names, stances, { overtime } = {}) {
+  const { system, user } = buildPrompts(topic, question, safeMessages, names, stances, false, overtime);
 
   const upstream = await fetch(OPENAI_URL, {
     method: 'POST',
@@ -570,12 +592,12 @@ function walkoverResult(participation, names) {
 // If the chosen engine's key is missing or its call fails, fall back to the
 // other one rather than erroring the whole debate. A judged result from the
 // "wrong" engine beats a 502 every time.
-async function runJudge({ mode, recency, topic, question, safeMessages, names, stances }) {
+async function runJudge({ mode, recency, topic, question, safeMessages, names, stances, overtime = null }) {
   const pplxKey = process.env.PERPLEXITY_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
-  const sonar = () => callSonar(pplxKey, topic, question, safeMessages, names, stances, { recency });
-  const mini = () => callMiniJudge(openaiKey, topic, question, safeMessages, names, stances);
+  const sonar = () => callSonar(pplxKey, topic, question, safeMessages, names, stances, { recency, overtime });
+  const mini = () => callMiniJudge(openaiKey, topic, question, safeMessages, names, stances, { overtime });
 
   const attempts = [];
   if (mode === 'verified') {
@@ -604,53 +626,198 @@ async function runJudge({ mode, recency, topic, question, safeMessages, names, s
   throw lastErr;
 }
 
-// ── AI-game handicap ───────────────────────────────────────────────────────
-// Small tilt toward the human in human-vs-AI debates. Human-vs-human games
-// are never touched. Env knobs:
-//   AI_GAME_HUMAN_BONUS   integer added to the human's score (default 1)
-//   AI_GAME_TIE_TO_HUMAN  'true' to hand the human every post-bonus tie
-//                         (default off — a tie stays a draw)
-// History: launched 9/27 with bonus 1 + ties-to-human → 85% human win rate,
-// zero draws. 9/29: tie rule off, then bonus removed the same night so the
-// outcome was purely the judge's scores. 10/1: +1 restored (ties still
-// draws) — pure scores made AI debates feel too hard.
-const AI_GAME_HUMAN_BONUS = Math.max(0, parseInt(process.env.AI_GAME_HUMAN_BONUS ?? '1', 10) || 0);
-const AI_GAME_TIE_TO_HUMAN = process.env.AI_GAME_TIE_TO_HUMAN === 'true';
-// Below this raw score the human was silent, trolling, or hostile (the
-// prompt caps those at 2) — no bonus for that.
-const HANDICAP_MIN_HUMAN_SCORE = 3;
+// ── AI games ───────────────────────────────────────────────────────────────
+// Human-vs-AI debates are scored exactly like human games. The old +1
+// "handicap" for the human (9/27 → 10/12) was removed when tie-break
+// overtime shipped: with the bonus gone an AI game can tie, and a tie now
+// goes to overtime instead of being nudged into a win.
 
-function applyAIGameHandicap(result, state) {
-  if (!result || !state) return result;
-  // Both knobs off: the judge's verdict is final, untouched.
-  if (AI_GAME_HUMAN_BONUS === 0 && !AI_GAME_TIE_TO_HUMAN) return result;
-  // AI standing in for a human match (side-select fallback) is judged like a
-  // human game — no tilt, or the rewards would give the disguise away.
-  if (state.aiFallback === true || state.aiFallback === 'true') return result;
-  const humanSymbol = state.player1Id === AI_OPPONENT_ID ? 'O'
-    : state.player2Id === AI_OPPONENT_ID ? 'X'
-    : null;
-  if (!humanSymbol) return result;
+// ── Overtime (tie-break) ───────────────────────────────────────────────────
+// A judged tie in regulation — both sides actually spoke and the judge
+// scored them equal — gets ONE extra turn each: the player who closed
+// regulation (P1) now goes second, so P2 opens overtime and P1 closes it.
+// The judge then scores ONLY the two overtime messages (with the whole
+// transcript as context) and the final verdict is regulation + overtime.
+// Still tied after that? It stays a tie. Only one overtime per game.
+//
+// Wire protocol:
+//   • Regulation /judge (phase omitted) — if the verdict is a real tie and
+//     both clients advertised the `overtime` capability at connect, the
+//     server patches the game (overtimeStartedAt / overtimeChatIndex /
+//     overtimeFirst), emits `overtimeStarted` to the game room, and the
+//     cached regulation result carries `overtimePending: true`.
+//   • Overtime /judge (phase: 'overtime') — scored from the SERVER's chatLog
+//     split at overtimeChatIndex (robust to a client that relaunched and
+//     replayed chat history), cached under judge:{gameId}:ot, and returned
+//     with `phase: 'final'`, `wasOvertime: true`, `regulation` and
+//     `overtime` score lines. Rewards settle only on this final verdict
+//     (see rewards.js getFinalJudgeResult).
+const OVERTIME_ENABLED = process.env.OVERTIME_ENABLED !== 'false';
+const MAX_MESSAGES = 80;
 
-  const humanKey = humanSymbol === 'X' ? 'scoreX' : 'scoreO';
-  const aiKey = humanSymbol === 'X' ? 'scoreO' : 'scoreX';
-  const rawHuman = result[humanKey];
-  if (typeof rawHuman !== 'number' || rawHuman < HANDICAP_MIN_HUMAN_SCORE) return result;
-
-  const human = Math.min(10, rawHuman + AI_GAME_HUMAN_BONUS);
-  const rawAI = typeof result[aiKey] === 'number' ? result[aiKey] : 0;
-  // Ties go to the human; drop the AI a point so the displayed scores agree
-  // with the "you won" banner instead of showing 6–6 next to a win.
-  const ai = (human === rawAI && AI_GAME_TIE_TO_HUMAN) ? Math.max(0, rawAI - 1) : rawAI;
-  const winner = human > ai ? humanSymbol : ai > human ? (humanSymbol === 'X' ? 'O' : 'X') : 'tie';
-
-  if (human !== rawHuman || ai !== rawAI || winner !== result.winner) {
-    console.log(`[judge] AI-game handicap: human ${rawHuman}->${human}, ai ${rawAI}->${ai}, winner ${result.winner}->${winner}`);
-  }
-  return { ...result, [humanKey]: human, [aiKey]: ai, winner };
+function overtimeKey(gameId) {
+  return `${gameId}:ot`;
 }
 
-function makeRouter() {
+function overtimeStartedAt(state) {
+  const n = Number(state?.overtimeStartedAt);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function overtimeAllowed(state) {
+  if (!OVERTIME_ENABLED || !state) return false;
+  return state.overtimeEligible === true || state.overtimeEligible === 'true';
+}
+
+// Leader-only: called with the fresh regulation verdict before it's cached.
+// Starts overtime when the verdict is a genuine tie and the game can do it.
+async function maybeStartOvertime(io, gameId, state, result) {
+  if (!result || result.winner !== 'tie' || result.judgeMode === 'walkover') return result;
+  if (!overtimeAllowed(state)) return result;
+  if (overtimeStartedAt(state)) return { ...result, phase: 'regulation', overtimePending: true };
+
+  const startedAt = Date.now();
+  const chatLog = Array.isArray(state.chatLog) ? state.chatLog : [];
+  const firstSymbol = state.player2Symbol || 'P2';
+  await store.patchGameState(gameId, {
+    overtimeStartedAt: startedAt,
+    overtimeChatIndex: chatLog.length,
+    overtimeFirst: firstSymbol,
+  });
+  const createdAt = Number(state.createdAt) || startedAt;
+  const payload = {
+    gameId,
+    clockElapsedMs: 0,
+    // Overtime start measured from game creation (same clock as the
+    // finishedTurns history) and the chatLog split point.
+    startedElapsedMs: Math.max(0, startedAt - createdAt),
+    chatIndex: chatLog.length,
+    firstSymbol,
+    regulation: { scoreX: result.scoreX, scoreO: result.scoreO },
+  };
+  if (io) io.to(`game:${gameId}`).emit('overtimeStarted', payload);
+  console.log(`[judge] overtime started gameId=${gameId} tie ${result.scoreX}-${result.scoreO} first=${firstSymbol} chatIndex=${chatLog.length}`);
+  return { ...result, phase: 'regulation', overtimePending: true, overtimeStartedAt: startedAt, overtimeFirst: firstSymbol };
+}
+
+// Every regulation response that says "overtime pending" also carries how
+// far into overtime the server clock already is, so a client that missed
+// the `overtimeStarted` socket event (or fetched the cached verdict a few
+// seconds later) can still anchor its overtime clock. Absolute timestamps
+// are never trusted client-side — only this elapsed delta.
+function withOvertimeClock(result, state) {
+  if (!result || !result.overtimePending) return result;
+  const startedAt = overtimeStartedAt(state) || (Number(result.overtimeStartedAt) > 0 ? Number(result.overtimeStartedAt) : null);
+  if (!startedAt) return result;
+  return { ...result, overtimeElapsedMs: Math.max(0, Date.now() - startedAt) };
+}
+
+// Overtime walkover: one side said nothing in the extra round, so the other
+// takes the tie-break. Both silent -> the tie stands.
+function overtimeWalkoverResult(participation, names) {
+  const { X, O } = participation;
+  if (X === 0 && O === 0) {
+    return {
+      winner: 'tie',
+      scoreX: 0,
+      scoreO: 0,
+      review: 'Neither player added anything in overtime, so the tie stands.',
+      sources: [],
+      judgeMode: 'walkover',
+    };
+  }
+  const participantScore = (count) => Math.min(8, 5 + Math.max(0, count - 1));
+  if (X === 0) {
+    return {
+      winner: 'O',
+      scoreX: 0,
+      scoreO: participantScore(O),
+      review: `${names.X} stayed silent in overtime, so ${names.O} takes the tie-break for making a closing case.`,
+      sources: [],
+      judgeMode: 'walkover',
+    };
+  }
+  return {
+    winner: 'X',
+    scoreX: participantScore(X),
+    scoreO: 0,
+    review: `${names.O} stayed silent in overtime, so ${names.X} takes the tie-break for making a closing case.`,
+    sources: [],
+    judgeMode: 'walkover',
+  };
+}
+
+// The server's chatLog is the source of truth for which messages were
+// overtime: everything at or after overtimeChatIndex. Symbols are P1/P2 on
+// the wire; the judge speaks X/O (P1 = X).
+function overtimeTranscript(state) {
+  const chatLog = Array.isArray(state.chatLog) ? state.chatLog : [];
+  const rawSplit = parseInt(state.overtimeChatIndex, 10);
+  const splitAt = Number.isFinite(rawSplit) ? Math.max(0, Math.min(chatLog.length, rawSplit)) : chatLog.length;
+  const p1 = state.player1Symbol || 'P1';
+  return chatLog
+    .map((entry, index) => ({
+      player: entry?.symbol === p1 ? 'X' : 'O',
+      text: typeof entry?.text === 'string' ? entry.text : '',
+      overtime: index >= splitAt,
+    }))
+    .filter((m) => m.text.trim().length > 0);
+}
+
+function composeFinalResult(regulation, overtime) {
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const otX = num(overtime.scoreX);
+  const otO = num(overtime.scoreO);
+  const regX = num(regulation.scoreX);
+  const regO = num(regulation.scoreO);
+  const winner = otX > otO ? 'X' : otO > otX ? 'O' : 'tie';
+  return {
+    winner,
+    scoreX: regX + otX,
+    scoreO: regO + otO,
+    review: overtime.review,
+    sources: Array.isArray(overtime.sources) ? overtime.sources : [],
+    judgeMode: overtime.judgeMode,
+    ...(overtime.breakdownX && overtime.breakdownO
+      ? { breakdownX: overtime.breakdownX, breakdownO: overtime.breakdownO }
+      : {}),
+    phase: 'final',
+    wasOvertime: true,
+    regulation: { scoreX: regX, scoreO: regO, review: regulation.review || null },
+    overtime: { scoreX: otX, scoreO: otO },
+  };
+}
+
+async function runOvertimeJudge({ state, regulation, topic, question, names, stances }) {
+  const all = overtimeTranscript(state);
+  const otMessages = all.filter((m) => m.overtime);
+  const participation = participationBySymbol(otMessages);
+  let verdict;
+  if (participation.X === 0 || participation.O === 0) {
+    verdict = overtimeWalkoverResult(participation, names);
+  } else {
+    const decision = decideJudgeMode({ state, messages: otMessages });
+    const recency = wantsRecencyFilter(state);
+    console.log(`[judge] overtime gameId=${state.gameId || '?'} mode=${decision.mode} reason=${decision.reason} recency=${recency} otMessages=${otMessages.length}`);
+    verdict = await runJudge({
+      mode: decision.mode,
+      recency,
+      topic,
+      question,
+      safeMessages: all.slice(-MAX_MESSAGES),
+      names,
+      stances,
+      overtime: { regulation: { scoreX: regulation.scoreX, scoreO: regulation.scoreO } },
+    });
+  }
+  return composeFinalResult(regulation, verdict);
+}
+
+function errorStatus(err) {
+  return err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
+}
+
+function makeRouter({ io = null } = {}) {
   const router = express.Router();
 
   router.post('/judge', async (req, res) => {
@@ -659,6 +826,7 @@ function makeRouter() {
       question = '',
       messages = [],
       gameId = '',
+      phase = 'regulation',
       playerNames: rawNames = {},
       playerStances: rawStances = {},
     } = req.body || {};
@@ -670,10 +838,49 @@ function makeRouter() {
     // player identities all come from it.
     const hasGameId = typeof gameId === 'string' && gameId.length > 0;
     const state = hasGameId ? await store.loadGameState(gameId) : null;
+    if (state && !state.gameId) state.gameId = gameId;
     const stances = resolvePlayerStances(state, rawStances);
     const names = await resolvePlayerNames(state, rawNames);
 
-    const MAX_MESSAGES = 80;
+    // ── Overtime pass ──
+    if (phase === 'overtime') {
+      if (!state || !overtimeStartedAt(state)) {
+        return res.status(409).json({ error: 'This game is not in overtime' });
+      }
+      const key = overtimeKey(gameId);
+      const cachedFinal = await store.getJudgeResult(key);
+      if (cachedFinal) return res.json(cachedFinal);
+
+      const regulation = await store.getJudgeResult(gameId);
+      if (!regulation) {
+        return res.status(409).json({ error: 'Regulation verdict is no longer available' });
+      }
+
+      const gotLock = await store.tryAcquireJudgeLock(key);
+      if (gotLock) {
+        try {
+          // The previous leader may have finished between our cache miss
+          // and this lock — don't pay for a second identical verdict.
+          const raced = await store.getJudgeResult(key);
+          if (raced) return res.json(raced);
+          const result = await runOvertimeJudge({ state, regulation, topic, question, names, stances });
+          await store.setJudgeResult(key, result);
+          return res.json(result);
+        } catch (err) {
+          console.error('[judge] overtime error:', err.message);
+          return res.status(errorStatus(err)).json({ error: 'Judge failed' });
+        } finally {
+          await store.releaseJudgeLock(key);
+        }
+      }
+
+      const result = await waitForCachedResult(key);
+      if (result) return res.json(result);
+      console.warn(`[judge] timed out waiting for overtime result for gameId=${gameId}`);
+      return res.status(504).json({ error: 'Judge timed out' });
+    }
+
+    // ── Regulation pass ──
     const safeMessages = messages
       .filter((m) => m && typeof m.text === 'string' && m.text.trim().length > 0)
       .slice(-MAX_MESSAGES);
@@ -707,30 +914,30 @@ function makeRouter() {
     // possible). This branch is mostly for safety — iOS always sends one.
     if (!hasGameId) {
       try {
-        const result = applyAIGameHandicap(await runJudge(judgeArgs), state);
+        const result = await runJudge(judgeArgs);
         return res.json(result);
       } catch (err) {
-        const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
         console.error('[judge] error:', err.message);
-        return res.status(status).json({ error: 'Judge failed' });
+        return res.status(errorStatus(err)).json({ error: 'Judge failed' });
       }
     }
 
     // Step 1: cached?
     const cached = await store.getJudgeResult(gameId);
-    if (cached) return res.json(cached);
+    if (cached) return res.json(withOvertimeClock(cached, state));
 
     // Step 2: try to be the leader for this gameId.
     const gotLock = await store.tryAcquireJudgeLock(gameId);
     if (gotLock) {
       try {
-        const result = applyAIGameHandicap(await runJudge(judgeArgs), state);
+        const raced = await store.getJudgeResult(gameId);
+        if (raced) return res.json(withOvertimeClock(raced, state));
+        const result = await maybeStartOvertime(io, gameId, state, await runJudge(judgeArgs));
         await store.setJudgeResult(gameId, result);
-        return res.json(result);
+        return res.json(withOvertimeClock(result, state));
       } catch (err) {
-        const status = err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
         console.error('[judge] error:', err.message);
-        return res.status(status).json({ error: 'Judge failed' });
+        return res.status(errorStatus(err)).json({ error: 'Judge failed' });
       } finally {
         // Release ASAP so a retry after a failure doesn't have to wait
         // out the lock TTL.
@@ -740,7 +947,7 @@ function makeRouter() {
 
     // Step 3: someone else is computing — wait for their result.
     const result = await waitForCachedResult(gameId);
-    if (result) return res.json(result);
+    if (result) return res.json(withOvertimeClock(result, state));
 
     console.warn(`[judge] timed out waiting for cached result for gameId=${gameId}`);
     return res.status(504).json({ error: 'Judge timed out' });
@@ -749,4 +956,24 @@ function makeRouter() {
   return router;
 }
 
-module.exports = { makeRouter };
+// Final verdict for settlement: the overtime result when the game went to
+// overtime, the regulation result otherwise, and null while a regulation
+// tie is still waiting on its overtime (nothing to settle yet).
+async function getFinalJudgeResult(gameId) {
+  const regulation = await store.getJudgeResult(gameId);
+  if (!regulation) return null;
+  if (!regulation.overtimePending) return regulation;
+  return store.getJudgeResult(overtimeKey(gameId));
+}
+
+// Is a verdict being computed right now — either pass? Used by the leave
+// handling so a Pass tapped during "Reviewing the debate…" isn't a forfeit.
+async function isFinalJudgeInProgress(gameId) {
+  const [regulation, overtime] = await Promise.all([
+    store.isJudgeInProgress(gameId).catch(() => false),
+    store.isJudgeInProgress(overtimeKey(gameId)).catch(() => false),
+  ]);
+  return regulation || overtime;
+}
+
+module.exports = { makeRouter, getFinalJudgeResult, isFinalJudgeInProgress, overtimeKey };

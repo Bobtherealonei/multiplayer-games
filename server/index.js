@@ -67,7 +67,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'turn-seconds-fix-1';
+const SERVER_VERSION = 'overtime-1';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -76,7 +76,7 @@ app.get('/', (req, res) => {
 
 // LLM proxy routes (keys live only in Render env vars).
 app.use(coachRoute.makeRouter());
-app.use(judgeRoute.makeRouter());
+app.use(judgeRoute.makeRouter({ io }));
 app.use(nextQuestionRoute.makeRouter());
 app.use(rewardsRoute.makeRouter());
 app.use(shopRoute.makeRouter());
@@ -104,11 +104,15 @@ io.on('connection', async (socket) => {
   // Private Support/Oppose selection lobby (see debateLobby.js). Only builds
   // that handle lobbyCreated for topic debates send this.
   const sideSelect = hs.sideSelect === '1' || hs.sideSelect === 'true';
-  store.setClientCaps(userId, { appVersion, serverTurns, sideSelect, at: Date.now() }).catch((err) => {
+  // Tie-break overtime (see judge.js maybeStartOvertime): one extra turn
+  // each after a judged tie. Only builds that handle `overtimeStarted` and
+  // the 10-turn schedule send this.
+  const overtime = hs.overtime === '1' || hs.overtime === 'true';
+  store.setClientCaps(userId, { appVersion, serverTurns, sideSelect, overtime, at: Date.now() }).catch((err) => {
     console.error('[connection] setClientCaps failed:', err.message);
   });
 
-  console.log(`Player connected: socket.id=${socket.id}, userId=${userId} app=${appVersion || 'legacy'} serverTurns=${serverTurns} sideSelect=${sideSelect}`);
+  console.log(`Player connected: socket.id=${socket.id}, userId=${userId} app=${appVersion || 'legacy'} serverTurns=${serverTurns} sideSelect=${sideSelect} overtime=${overtime}`);
 
   // Every socket joins this user's personal room. All cross-instance
   // emits to a specific user go through `io.to(userRoom(uid)).emit(...)`,

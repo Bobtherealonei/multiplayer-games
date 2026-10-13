@@ -27,6 +27,7 @@ const store = require('./gameStore');
 const { getDb, getAdmin, getAuth } = require('./firestoreClient');
 const { dayKey } = require('./timeUtil');
 const { AI_OPPONENT_ID } = require('./aiOpponent');
+const { getFinalJudgeResult } = require('./judge');
 
 const RANK_WIN = 10;
 const RANK_LOSS = 8;
@@ -313,7 +314,16 @@ function judgeSummary(judge) {
     winner: judge.winner || null,
     review: typeof judge.review === 'string' ? judge.review.slice(0, 2000) : null,
     breakdownX: compactBreakdown(judge.breakdownX),
-    breakdownO: compactBreakdown(judge.breakdownO)
+    breakdownO: compactBreakdown(judge.breakdownO),
+    // Tie-break overtime: totals above are regulation + overtime; keep the
+    // two lines so the admin panel can show "6–6 · OT 7–5".
+    wasOvertime: judge.wasOvertime === true,
+    regulation: judge.regulation
+      ? { scoreX: num(judge.regulation.scoreX), scoreO: num(judge.regulation.scoreO) }
+      : null,
+    overtime: judge.overtime
+      ? { scoreX: num(judge.overtime.scoreX), scoreO: num(judge.overtime.scoreO) }
+      : null
   };
 }
 
@@ -402,8 +412,10 @@ async function processForfeit(gameId, quitterId, { cause = 'left' } = {}) {
 
   // If the debate already reached an official verdict (judge ran), finalize
   // THAT result instead of a forfeit — quitting the result screen shouldn't
-  // turn a win into a loss. processResult is idempotent regardless.
-  const judge = await store.getJudgeResult(gameId);
+  // turn a win into a loss. processResult is idempotent regardless. A
+  // regulation tie that's waiting on overtime is NOT a verdict yet, so
+  // quitting during overtime is still a forfeit.
+  const judge = await getFinalJudgeResult(gameId);
   const judgedOutcome = judge ? outcomeFromJudge(state, judge) : null;
 
   const silent = !judgedOutcome && bothPlayersSilent(state);
@@ -471,9 +483,10 @@ function makeRouter() {
       return res.json({ status: 'noResult' });
     }
 
-    const judge = await store.getJudgeResult(gameId);
+    const judge = await getFinalJudgeResult(gameId);
     if (!judge) {
-      // Judge hasn't finished yet — client should retry shortly.
+      // Judge hasn't finished yet (or a tie is still in overtime) — client
+      // should retry once the final verdict is in.
       return res.json({ status: 'pending' });
     }
 
