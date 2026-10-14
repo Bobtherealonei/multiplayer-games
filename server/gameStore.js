@@ -56,6 +56,42 @@ local b = redis.call('ZPOPMIN', KEYS[2], 1)
 return {a[1], a[2], b[1], b[2]}
 `;
 
+// Atomic chat append with caps. Two messages landing within one Redis
+// round-trip (a buzzer-beater and the opponent's opener, or a fast double
+// send) used to race load→patch and overwrite each other — and the judge
+// now grades THIS log, so every line has to stick.
+// ARGV: symbol, text, maxPerTurn, maxTotal, nowMs, ttlSeconds, turnIndex
+// Returns 'ok' | 'too_many' | 'missing'
+const APPEND_CHAT_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 'missing' end
+local raw = redis.call('HGET', KEYS[1], 'chatLog')
+local log = {}
+if raw and raw ~= '' and raw ~= 'null' then log = cjson.decode(raw) end
+local n = #log
+if n >= tonumber(ARGV[4]) then return 'too_many' end
+local turn = tonumber(ARGV[7])
+local inTurn = 0
+for i = n, 1, -1 do
+  if type(log[i]) == 'table' and log[i].symbol == ARGV[1] and log[i].turn == turn then inTurn = inTurn + 1 end
+end
+if inTurn >= tonumber(ARGV[3]) then return 'too_many' end
+log[n + 1] = { symbol = ARGV[1], text = ARGV[2], turn = turn }
+redis.call('HSET', KEYS[1], 'chatLog', cjson.encode(log))
+local started = redis.call('HGET', KEYS[1], 'startedAt')
+if not started or started == '' or started == 'null' then
+  redis.call('HSET', KEYS[1], 'startedAt', ARGV[5])
+end
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+return 'ok'
+`;
+
+let appendChatSha = null;
+async function ensureAppendChatLoaded() {
+  if (appendChatSha) return appendChatSha;
+  appendChatSha = await client.script('LOAD', APPEND_CHAT_LUA);
+  return appendChatSha;
+}
+
 let popPairSha = null;
 async function ensurePopPairLoaded() {
   if (popPairSha) return popPairSha;
@@ -100,6 +136,24 @@ async function patchGameState(gameId, partial) {
     .hset(k, flat)
     .expire(k, GAME_TTL_SECONDS)
     .exec();
+}
+
+/**
+ * Atomically append a chat line, enforcing per-turn and total caps inside
+ * Redis. Resolves 'ok' | 'too_many' | 'missing'.
+ */
+async function appendChat(gameId, symbol, text, { maxPerTurn, maxTotal, turnIndex } = {}) {
+  const sha = await ensureAppendChatLoaded();
+  const args = [`game:${gameId}`, symbol, text, String(maxPerTurn ?? 8), String(maxTotal ?? 120), String(Date.now()), String(GAME_TTL_SECONDS), String(Number.isInteger(turnIndex) ? turnIndex : -1)];
+  try {
+    return await client.evalsha(sha, 1, ...args);
+  } catch (err) {
+    if (String(err?.message || '').includes('NOSCRIPT')) {
+      appendChatSha = null;
+      return client.eval(APPEND_CHAT_LUA, 1, ...args);
+    }
+    throw err;
+  }
 }
 
 async function loadGameState(gameId) {
@@ -287,7 +341,9 @@ async function popPair(gameType) {
   // we drop them and tell the caller to retry — they'll re-enqueue if they
   // really are still searching.
   const now = Date.now();
-  if (now - Number(s1) > QUEUE_STALE_MS) return { stale: u1 };
+  // Both entries were popped; the one we keep must be handed back to the
+  // caller to re-enqueue, whichever side was stale.
+  if (now - Number(s1) > QUEUE_STALE_MS) return { stale: u1, returned: u2 };
   if (now - Number(s2) > QUEUE_STALE_MS) return { stale: u2, returned: u1 };
   return { user1: u1, user2: u2 };
 }
@@ -603,7 +659,10 @@ async function isPlayerOnline(userId) {
 
 // ── Judge cache (single-flight) ─────────────────────────────────────────
 
-const JUDGE_RESULT_TTL_SECONDS = 10 * 60;
+// Verdicts live as long as the game state: a player who idles on the
+// results screen and then leaves must still be treated as post-debate, not
+// as a mid-debate quitter.
+const JUDGE_RESULT_TTL_SECONDS = GAME_TTL_SECONDS;
 const JUDGE_LOCK_TTL_SECONDS = 60;
 
 async function getJudgeResult(gameId) {
@@ -687,6 +746,7 @@ module.exports = {
   // game state
   saveGameState,
   patchGameState,
+  appendChat,
   loadGameState,
   deleteGame,
   // player ↔ game

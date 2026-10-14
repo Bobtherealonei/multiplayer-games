@@ -181,8 +181,11 @@ class Matchmaking {
     }
   }
 
-  async removePlayer(userId) {
-    await this.lobbyManager.leaveLobby(userId);
+  // `keepLobby`: a socket drop is not a decision. The side-select lobby has
+  // its own deadline (no pick → no-show handling), and the player's next
+  // connection reattaches to it, so a blip must not cancel it for both.
+  async removePlayer(userId, { keepLobby = false } = {}) {
+    if (!keepLobby) await this.lobbyManager.leaveLobby(userId);
     await store.removeFromAllQueues(userId);
     await store.clearAllUserQueueEntries(userId);
   }

@@ -26,6 +26,7 @@ const rewardsRoute = require('./rewards');
 const shopRoute = require('./shop');
 const shopRotation = require('./shopRotation');
 const leaderboardRoute = require('./leaderboard');
+const { getAuth } = require('./firestoreClient');
 
 const app = express();
 
@@ -67,7 +68,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'aside-1';
+const SERVER_VERSION = 'secure-1';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -86,14 +87,48 @@ app.use(leaderboardRoute.makeRouter());
 // rotations fresh. Deterministic generation means every instance agrees.
 shopRotation.scheduleRotations();
 
+// ── Socket identity ────────────────────────────────────────────────────────
+// Newer apps send a Firebase ID token in the Socket.IO connect payload
+// (`handshake.auth.idToken`); the uid comes from the verified token, never
+// from the client's claim. Pre-token builds only send `query.userId`; those
+// are still admitted (flagged `authenticated=false`) until the fleet has
+// moved on — set REQUIRE_SOCKET_AUTH=true to turn them away.
+const REQUIRE_SOCKET_AUTH = process.env.REQUIRE_SOCKET_AUTH === 'true';
+
+io.use(async (socket, next) => {
+  const q = socket.handshake.query || {};
+  const a = socket.handshake.auth || {};
+  const claimed = (typeof q.userId === 'string' && q.userId) || (typeof a.userId === 'string' && a.userId) || null;
+  const idToken = (typeof a.idToken === 'string' && a.idToken) || (typeof q.idToken === 'string' && q.idToken) || null;
+
+  if (idToken) {
+    const auth = getAuth();
+    if (!auth) return next(new Error('auth_unavailable'));
+    try {
+      const decoded = await auth.verifyIdToken(idToken);
+      if (claimed && claimed !== decoded.uid) {
+        console.warn(`[auth] uid mismatch: token=${decoded.uid} claimed=${claimed}`);
+        return next(new Error('auth_mismatch'));
+      }
+      socket.data.uid = decoded.uid;
+      socket.data.authenticated = true;
+      return next();
+    } catch (err) {
+      const expired = err && err.code === 'auth/id-token-expired';
+      return next(new Error(expired ? 'auth_expired' : 'auth_invalid'));
+    }
+  }
+
+  if (REQUIRE_SOCKET_AUTH || !claimed) {
+    return next(new Error('auth_required'));
+  }
+  socket.data.uid = claimed;
+  socket.data.authenticated = false;
+  return next();
+});
+
 io.on('connection', async (socket) => {
-  // userId is supplied by the iOS client through socket.handshake. Falling
-  // back to socket.id keeps things working in dev (e.g. a curl-based
-  // sanity check) but in production every real client sends a Firebase uid.
-  const userId =
-    socket.handshake.query?.userId ||
-    socket.handshake.auth?.userId ||
-    socket.id;
+  const userId = socket.data.uid;
   socket.userId = userId;
 
   // Record what this build supports (see gameStore.setClientCaps). Older
@@ -112,14 +147,20 @@ io.on('connection', async (socket) => {
     console.error('[connection] setClientCaps failed:', err.message);
   });
 
-  console.log(`Player connected: socket.id=${socket.id}, userId=${userId} app=${appVersion || 'legacy'} serverTurns=${serverTurns} sideSelect=${sideSelect} overtime=${overtime}`);
+  console.log(`Player connected: socket.id=${socket.id}, userId=${userId} auth=${socket.data.authenticated ? 'token' : 'legacy'} app=${appVersion || 'legacy'} serverTurns=${serverTurns} sideSelect=${sideSelect} overtime=${overtime}`);
 
   // Every socket joins this user's personal room. All cross-instance
   // emits to a specific user go through `io.to(userRoom(uid)).emit(...)`,
   // which is delivered by the redis-adapter to whichever instance owns
-  // the live socket.
-  await socket.join(`user:${userId}`);
-  await store.setPlayerOnline(userId);
+  // the live socket. Never let a Redis hiccup here abort the handler
+  // before the event listeners below are registered (the socket would stay
+  // connected but deaf).
+  try {
+    await socket.join(`user:${userId}`);
+    await store.setPlayerOnline(userId);
+  } catch (err) {
+    console.error('[connection] join/online failed:', err.message);
+  }
 
   // If this user already has an active game (e.g. they had a transient
   // blip and Socket.IO auto-reconnected, possibly to a DIFFERENT instance
@@ -337,7 +378,7 @@ io.on('connection', async (socket) => {
       // the grace-period timer; if the user reconnects within that
       // window (possibly to another instance), the timer is cancelled.
       await store.clearPlayerOnline(userId);
-      await matchmaking.removePlayer(userId);
+      await matchmaking.removePlayer(userId, { keepLobby: true });
       await gameManager.handleDisconnect(userId);
     } catch (err) {
       console.error('[disconnect] failed:', err.message);

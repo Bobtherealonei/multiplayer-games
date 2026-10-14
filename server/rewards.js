@@ -36,25 +36,32 @@ const SPARK_WIN_BONUS = 8;
 const SPARK_DRAW = 1;
 const SPARK_FIRST_OF_DAY = 3;
 const SPARK_THREE_IN_DAY = 4;
+// Trophies from beating the house AI count toward the cash leaderboard only
+// this many times per day; further AI wins still pay spark. Keeps a script
+// grinding the AI from buying a prize rank.
+const AI_RANKED_WINS_PER_DAY = Math.max(0, parseInt(process.env.AI_RANKED_WINS_PER_DAY ?? '10', 10) || 10);
 
 function defaultUserTokens(data) {
   return {
     rankTokens: Number.isFinite(data?.rankTokens) ? data.rankTokens : 100,
     sparkTokens: Number.isFinite(data?.sparkTokens) ? data.sparkTokens : 0,
     lastDebateDay: data?.lastDebateDay || null,
-    debatesToday: Number.isFinite(data?.debatesToday) ? data.debatesToday : 0
+    debatesToday: Number.isFinite(data?.debatesToday) ? data.debatesToday : 0,
+    aiRankedWinsDay: data?.aiRankedWinsDay || null,
+    aiRankedWinsToday: Number.isFinite(data?.aiRankedWinsToday) ? data.aiRankedWinsToday : 0
   };
 }
 
 // Compute one player's deltas + the history entries describing them.
-function computePlayerRewards(role, current, todayKey, debateId) {
+// `rankCapped`: a win whose trophies are withheld (daily AI cap reached).
+function computePlayerRewards(role, current, todayKey, debateId, { rankCapped = false } = {}) {
   // role: 'win' | 'loss' | 'draw'
   let rankDelta = 0;
   let sparkDelta = 0;
   const history = [];
 
   // ── Rank ──
-  if (role === 'win') rankDelta = RANK_WIN;
+  if (role === 'win') rankDelta = rankCapped ? 0 : RANK_WIN;
   else if (role === 'loss') rankDelta = -RANK_LOSS;
   // draw: no rank/trophy change
 
@@ -188,6 +195,7 @@ async function processResult({
       tx.set(resultRef, {
         rewardsProcessed: true,
         rewardsSkipped,
+        applied: Object.fromEntries(updateUids.map((uid) => [uid, { rank: 0, spark: 0 }])),
         durationMs,
         gameId,
         gameType: gameType || null,
@@ -218,10 +226,20 @@ async function processResult({
 
     const snaps = await Promise.all(userRefs.map((ref) => tx.get(ref)));
     const perUser = {};
+    const aiRankedWin = {};
     for (let i = 0; i < updateUids.length; i++) {
       const uid = updateUids[i];
       const current = defaultUserTokens(snaps[i].exists ? snaps[i].data() : {});
-      perUser[uid] = computePlayerRewards(roleByUid[uid], current, todayKey, gameId);
+      // Daily cap on trophies from the house AI (stand-in games are paid as
+      // human games and don't count here).
+      let rankCapped = false;
+      if (aiGame && !aiFallback && roleByUid[uid] === 'win') {
+        const soFar = current.aiRankedWinsDay === todayKey ? current.aiRankedWinsToday : 0;
+        rankCapped = soFar >= AI_RANKED_WINS_PER_DAY;
+        aiRankedWin[uid] = soFar + 1;
+        if (rankCapped) console.log(`[rewards] gameId=${gameId} uid=${uid} AI win #${soFar + 1} today — trophies capped`);
+      }
+      perUser[uid] = computePlayerRewards(roleByUid[uid], current, todayKey, gameId, { rankCapped });
     }
 
     // Apply balances + daily counters + lifetime W/L record (shown on the
@@ -247,6 +265,10 @@ async function processResult({
         const aiField =
           role === 'win' ? 'aiDebateWins' : role === 'loss' ? 'aiDebateLosses' : 'aiDebateDraws';
         userUpdate[aiField] = FieldValue.increment(1);
+        if (aiRankedWin[uid]) {
+          userUpdate.aiRankedWinsDay = todayKey;
+          userUpdate.aiRankedWinsToday = aiRankedWin[uid];
+        }
       }
       tx.set(userRefs[i], userUpdate, { merge: true });
       // Mirror the record + rank balance to the public profile so other
@@ -272,6 +294,15 @@ async function processResult({
 
     const winnerId = isDraw ? null : outcome.winnerId;
     const loserId = isDraw ? null : outcome.loserId;
+    const balances = Object.fromEntries(
+      updateUids.map((uid) => [uid, { rankTokens: perUser[uid].newRank, sparkTokens: perUser[uid].newSpark }])
+    );
+    const applied = Object.fromEntries(
+      updateUids.map((uid) => [uid, { rank: perUser[uid].rankApplied, spark: perUser[uid].sparkApplied }])
+    );
+    // Persist the per-player view too: the judge settles the game the
+    // moment the verdict exists, so the phones' own /debate-result calls
+    // land on `alreadyProcessed` and must still get their token numbers.
     tx.set(resultRef, {
       rewardsProcessed: true,
       gameId,
@@ -283,6 +314,8 @@ async function processResult({
       winnerId,
       loserId,
       reason: reason || 'completed',
+      balances,
+      applied,
       ...judgeFields,
       completedAt: FieldValue.serverTimestamp()
     });
@@ -292,12 +325,8 @@ async function processResult({
       result: outcome.result,
       winnerId,
       loserId,
-      balances: Object.fromEntries(
-        updateUids.map((uid) => [uid, { rankTokens: perUser[uid].newRank, sparkTokens: perUser[uid].newSpark }])
-      ),
-      applied: Object.fromEntries(
-        updateUids.map((uid) => [uid, { rank: perUser[uid].rankApplied, spark: perUser[uid].sparkApplied }])
-      )
+      balances,
+      applied
     };
   });
 }

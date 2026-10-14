@@ -29,7 +29,8 @@
 
 const express = require('express');
 const store = require('./gameStore');
-const { getDb } = require('./firestoreClient');
+const turnClock = require('./turnClock');
+const { getDb, getAuth } = require('./firestoreClient');
 const {
   AI_OPPONENT_ID,
   isSubstantiveText,
@@ -817,6 +818,97 @@ function errorStatus(err) {
   return err.status && err.status >= 400 && err.status < 600 ? 502 : 500;
 }
 
+// ── Caller verification + settlement ───────────────────────────────────────
+// Newer apps send their Firebase ID token (Authorization: Bearer … or body
+// idToken) and must be a participant of the game. Pre-token builds send
+// nothing; they are still served (the transcript is the server's own, and
+// the clock gate applies) until REQUIRE_JUDGE_AUTH=true turns them away.
+const REQUIRE_JUDGE_AUTH = process.env.REQUIRE_JUDGE_AUTH === 'true';
+// A phone's clock may run a hair ahead of ours; let the final call in this
+// many seconds early rather than bounce a legitimate end-of-debate request.
+const JUDGE_EARLY_TOLERANCE_S = 3;
+
+function bearerToken(req) {
+  const header = req.get('authorization') || '';
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (m) return m[1].trim();
+  const body = req.body && req.body.idToken;
+  return typeof body === 'string' && body.length > 0 ? body : null;
+}
+
+/**
+ * Resolves `{ uid, authenticated }` or `{ error, status }`. With a token the
+ * uid must be player1 or player2 of `state` (when a state exists).
+ */
+async function verifyJudgeCaller(req, state) {
+  const token = bearerToken(req);
+  if (!token) {
+    if (REQUIRE_JUDGE_AUTH) return { error: 'Sign-in required', status: 401 };
+    return { uid: null, authenticated: false };
+  }
+  const auth = getAuth();
+  if (!auth) return { error: 'Auth unavailable', status: 500 };
+  let uid;
+  try {
+    uid = (await auth.verifyIdToken(token)).uid;
+  } catch (_) {
+    return { error: 'Invalid auth token', status: 401 };
+  }
+  if (state && uid !== state.player1Id && uid !== state.player2Id) {
+    return { error: 'Not a participant in this game', status: 403 };
+  }
+  return { uid, authenticated: true };
+}
+
+/** Whole seconds until turn `lastIndex` ends on the server clock (>= 1). */
+function secondsUntilEnd(state, lastIndex) {
+  const elapsed = turnClock.effectiveElapsedSeconds(state) ?? 0;
+  const end = turnClock.turnEndSeconds(turnClock.schedule(state), lastIndex);
+  return Math.max(1, Math.ceil(end - elapsed));
+}
+
+function isAIGame(state) {
+  return state?.isAIGame === true || state?.isAIGame === 'true'
+    || state?.player1Id === AI_OPPONENT_ID || state?.player2Id === AI_OPPONENT_ID;
+}
+
+/** True when the AI side of an AI game is the silent one. */
+function aiSideSilent(state, participation) {
+  const aiIsX = state.player1Id === AI_OPPONENT_ID;
+  return aiIsX ? participation.X === 0 : participation.O === 0;
+}
+
+// The AI never spoke (client never asked for replies, or the model was
+// down). Not a contest — nobody takes trophies off the house for that.
+function noContestResult(names) {
+  return {
+    winner: 'tie',
+    scoreX: 0,
+    scoreO: 0,
+    review: `${names.X} and ${names.O} never actually exchanged arguments, so there is nothing to judge.`,
+    sources: [],
+    judgeMode: 'walkover',
+    noContest: true,
+  };
+}
+
+// Pay out as soon as the final verdict exists, from the judge itself, so a
+// debate is settled even if neither phone ever manages to call
+// /debate-result (both backgrounded, app killed, network gone). Idempotent
+// via debateResults/{gameId}; the client's later call just reads it back.
+function settleIfFinal(gameId, state, result) {
+  if (!result || result.overtimePending) return;
+  // Lazy: rewards.js requires this module.
+  const { settleJudgedResult } = require('./rewards');
+  settleJudgedResult(gameId, state, result)
+    .then((summary) => {
+      if (summary && !summary.alreadyProcessed) {
+        console.log(`[judge] settled gameId=${gameId} result=${summary.result} winner=${summary.winnerId || 'none'}${summary.rewardsSkipped ? ` skipped=${summary.rewardsSkipped}` : ''}`);
+      }
+    })
+    .catch((err) => console.error(`[judge] settle failed gameId=${gameId}:`, err.message));
+}
+
 function makeRouter({ io = null } = {}) {
   const router = express.Router();
 
@@ -839,6 +931,10 @@ function makeRouter({ io = null } = {}) {
     const hasGameId = typeof gameId === 'string' && gameId.length > 0;
     const state = hasGameId ? await store.loadGameState(gameId) : null;
     if (state && !state.gameId) state.gameId = gameId;
+
+    const caller = await verifyJudgeCaller(req, state);
+    if (caller.error) return res.status(caller.status).json({ error: caller.error });
+
     const stances = resolvePlayerStances(state, rawStances);
     const names = await resolvePlayerNames(state, rawNames);
 
@@ -855,6 +951,10 @@ function makeRouter({ io = null } = {}) {
       if (!regulation) {
         return res.status(409).json({ error: 'Regulation verdict is no longer available' });
       }
+      if (!turnClock.overtimeOver(state, Date.now() + JUDGE_EARLY_TOLERANCE_S * 1000)) {
+        const cur = turnClock.currentTurn(state);
+        return res.status(409).json({ error: 'Overtime still in progress', turnIndex: cur.index, secondsLeft: secondsUntilEnd(state, cur.turns.length - 1) });
+      }
 
       const gotLock = await store.tryAcquireJudgeLock(key);
       if (gotLock) {
@@ -865,6 +965,7 @@ function makeRouter({ io = null } = {}) {
           if (raced) return res.json(raced);
           const result = await runOvertimeJudge({ state, regulation, topic, question, names, stances });
           await store.setJudgeResult(key, result);
+          settleIfFinal(gameId, state, result);
           return res.json(result);
         } catch (err) {
           console.error('[judge] overtime error:', err.message);
@@ -881,40 +982,21 @@ function makeRouter({ io = null } = {}) {
     }
 
     // ── Regulation pass ──
-    const safeMessages = messages
-      .filter((m) => m && typeof m.text === 'string' && m.text.trim().length > 0)
-      .slice(-MAX_MESSAGES);
 
-    // Walkover rule: silent player loses, both silent ties. Reactions like
-    // "[rxn:flame.fill]" don't count as participation.
-    const participation = participationBySymbol(safeMessages);
-    if (participation.X === 0 || participation.O === 0) {
-      const result = walkoverResult(participation, names);
-      if (hasGameId) {
-        await store.setJudgeResult(gameId, result).catch(() => {});
-      }
-      return res.json(result);
-    }
-
-    const decision = decideJudgeMode({ state, messages: safeMessages });
-    const recency = wantsRecencyFilter(state);
-    console.log(`[judge] gameId=${gameId || 'none'} mode=${decision.mode} reason=${decision.reason} recency=${recency}`);
-
-    const judgeArgs = {
-      mode: decision.mode,
-      recency,
-      topic,
-      question,
-      safeMessages,
-      names,
-      stances,
-    };
-
-    // No gameId? Fall back to per-call execution (no de-duplication
-    // possible). This branch is mostly for safety — iOS always sends one.
+    // No gameId: nothing to protect (no cache, no settlement — rewards need
+    // a live game), so grade whatever the caller sent, per call. iOS always
+    // sends a gameId; this is a safety net.
     if (!hasGameId) {
+      const safeMessages = messages
+        .filter((m) => m && typeof m.text === 'string' && m.text.trim().length > 0)
+        .slice(-MAX_MESSAGES);
+      const participation = participationBySymbol(safeMessages);
+      if (participation.X === 0 || participation.O === 0) {
+        return res.json(walkoverResult(participation, names));
+      }
+      const decision = decideJudgeMode({ state: null, messages: safeMessages });
       try {
-        const result = await runJudge(judgeArgs);
+        const result = await runJudge({ mode: decision.mode, recency: false, topic, question, safeMessages, names, stances });
         return res.json(result);
       } catch (err) {
         console.error('[judge] error:', err.message);
@@ -922,18 +1004,56 @@ function makeRouter({ io = null } = {}) {
       }
     }
 
-    // Step 1: cached?
+    if (!state) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+
+    // Step 1: cached? (Before anything else — including the walkover rule —
+    // so a later call can never overwrite the verdict the players saw.)
     const cached = await store.getJudgeResult(gameId);
     if (cached) return res.json(withOvertimeClock(cached, state));
 
-    // Step 2: try to be the leader for this gameId.
+    // Step 2: the debate must actually be over on the SERVER's clock. The
+    // transcript below is the server's chatLog, so nothing the caller sends
+    // can change who said what — but without this gate anyone could lock in
+    // a verdict mid-debate.
+    if (!turnClock.regulationOver(state, Date.now() + JUDGE_EARLY_TOLERANCE_S * 1000)) {
+      const cur = turnClock.currentTurn(state);
+      return res.status(409).json({ error: 'Debate still in progress', turnIndex: cur.index, secondsLeft: secondsUntilEnd(state, turnClock.REGULATION_TURNS - 1) });
+    }
+
+    // Step 3: try to be the leader for this gameId.
     const gotLock = await store.tryAcquireJudgeLock(gameId);
     if (gotLock) {
       try {
         const raced = await store.getJudgeResult(gameId);
         if (raced) return res.json(withOvertimeClock(raced, state));
-        const result = await maybeStartOvertime(io, gameId, state, await runJudge(judgeArgs));
+
+        // Regulation transcript from the server's chatLog (everything before
+        // overtime; there is none yet on this pass).
+        const safeMessages = overtimeTranscript(state).filter((m) => !m.overtime).slice(-MAX_MESSAGES);
+        const participation = participationBySymbol(safeMessages);
+        let result;
+        if (participation.X === 0 || participation.O === 0) {
+          // Walkover: silent player loses, both silent ties. Against the
+          // house AI a silent AI is a no-contest tie, not a free win — the
+          // AI only speaks when the client asks it to.
+          result = isAIGame(state) && aiSideSilent(state, participation)
+            ? noContestResult(names)
+            : walkoverResult(participation, names);
+        } else {
+          const decision = decideJudgeMode({ state, messages: safeMessages });
+          const recency = wantsRecencyFilter(state);
+          console.log(`[judge] gameId=${gameId} mode=${decision.mode} reason=${decision.reason} recency=${recency} messages=${safeMessages.length}`);
+          result = await maybeStartOvertime(
+            io,
+            gameId,
+            state,
+            await runJudge({ mode: decision.mode, recency, topic, question, safeMessages, names, stances })
+          );
+        }
         await store.setJudgeResult(gameId, result);
+        settleIfFinal(gameId, state, result);
         return res.json(withOvertimeClock(result, state));
       } catch (err) {
         console.error('[judge] error:', err.message);

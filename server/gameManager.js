@@ -42,6 +42,7 @@ const {
   generateCasualAside,
 } = require('./aiOpponent');
 const { pickNextQuestionForPair } = require('./questionPicker');
+const turnClock = require('./turnClock');
 
 // How long a disconnected player can be gone (e.g. app backgrounded) before
 // the game counts it as a forfeit. Generous on purpose: the debate clock keeps
@@ -80,6 +81,13 @@ function userRoom(userId) { return `user:${userId}`; }
 function gameRoom(gameId) { return `game:${gameId}`; }
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
+// Chat limits. A message sent on the buzzer can reach us after the turn
+// boundary on our clock; allow that much slack before calling it out of turn.
+const MAX_CHAT_CHARS = 600;
+const MAX_MESSAGES_PER_TURN = 8;
+const MAX_CHAT_MESSAGES = 120;
+const CHAT_GRACE_SECONDS = 8;
 
 // The client asks for the AI's reply this long into the AI's turn
 // (DebateTopicView.aiThinkSeconds), so "N seconds into the turn" on the
@@ -250,6 +258,9 @@ class GameManager {
     const everyoneServerTurns = caps.every((c) => c && c.serverTurns === true);
     serialized.turnSeconds = everyoneServerTurns ? TURN_SECONDS : LEGACY_TURN_SECONDS;
     serialized.thinkingSeconds = THINKING_SECONDS;
+    // A pre-clock build in the game runs its own hardcoded schedule, so the
+    // server's turn-ownership checks (turnClock) are relaxed for it.
+    serialized.legacyClocks = !everyoneServerTurns;
     // Mirror onto the live instance too: the initial gameState below is built
     // from `game`, not from Redis. Without this the first broadcast carried
     // turnSeconds=null (clients fell back to 45 s) and the next re-broadcast
@@ -680,26 +691,71 @@ class GameManager {
     }
   }
 
-  // Chat: relay to the other human player, or generate an AI reply.
-  async handleChat(playerId, payload) {
-    const gameId = payload?.gameId || (await store.getPlayerGame(playerId));
-    if (!gameId) return;
+  // Resolve the game a socket event is about, from the SERVER's player→game
+  // mapping — never from the payload. Returns null (and drops the event) if
+  // the player isn't in a game, names a different game, or isn't one of its
+  // two players. `symbol` is the player's own side, derived here so no
+  // handler ever trusts a client-supplied P1/P2.
+  async _loadGameForPlayer(playerId, payload, what) {
+    const gameId = await store.getPlayerGame(playerId);
+    if (!gameId) return null;
+    if (payload?.gameId && payload.gameId !== gameId) {
+      console.warn(`[gameManager] ${what}: userId=${playerId} named gameId=${payload.gameId} but is in ${gameId} — dropped`);
+      return null;
+    }
     const state = await store.loadGameState(gameId);
-    if (!state) return;
-
+    if (!state) return null;
+    const symbol = turnClock.symbolFor(state, playerId);
+    if (!symbol) {
+      console.warn(`[gameManager] ${what}: userId=${playerId} is not a player in gameId=${gameId} — dropped`);
+      return null;
+    }
     const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+    return { gameId, state, symbol, otherId };
+  }
+
+  // Chat: relay to the other human player, or record for the AI's next turn.
+  async handleChat(playerId, payload) {
+    const ctx = await this._loadGameForPlayer(playerId, payload, 'chat');
+    if (!ctx) return;
+    const { gameId, state, symbol, otherId } = ctx;
     if (!otherId) return;
 
-    const chatLog = [...(state.chatLog || []), { symbol: payload?.symbol, text: payload?.message }];
-    const startedAt = state.startedAt || Date.now();
-    await store.patchGameState(gameId, { chatLog, startedAt });
+    const text = typeof payload?.message === 'string' ? payload.message.trim().slice(0, MAX_CHAT_CHARS) : '';
+    if (!text) return;
+
+    // Only during your own chat window (plus a little slack for a message
+    // sent on the buzzer). Games with a pre-clock build in them run on the
+    // old 45 s schedule that we can't reproduce exactly, so they're exempt.
+    const legacyClocks = state.legacyClocks === true || state.legacyClocks === 'true';
+    if (!legacyClocks && !turnClock.mayChat(state, symbol, Date.now(), CHAT_GRACE_SECONDS)) {
+      const cur = turnClock.currentTurn(state);
+      console.warn(`[gameManager] chat out of turn: userId=${playerId} gameId=${gameId} symbol=${symbol} current=${cur.symbol || 'over'}#${cur.index} — dropped`);
+      this.io.to(userRoom(playerId)).emit('chatRejected', { gameId, reason: 'not_your_turn', message: text });
+      return;
+    }
+
+    // Append atomically in Redis (caps enforced there too) — a turn holds a
+    // handful of messages, not a flood, and two near-simultaneous lines
+    // must both survive since the judge grades this log.
+    const outcome = await store.appendChat(gameId, symbol, text, {
+      maxPerTurn: MAX_MESSAGES_PER_TURN,
+      maxTotal: MAX_CHAT_MESSAGES,
+      turnIndex: turnClock.currentTurn(state).index,
+    });
+    if (outcome !== 'ok') {
+      if (outcome === 'too_many') {
+        this.io.to(userRoom(playerId)).emit('chatRejected', { gameId, reason: 'too_many', message: text });
+      }
+      return;
+    }
 
     const isAIGame = Boolean(state.isAIGame) || otherId === AI_OPPONENT_ID;
     if (!isAIGame) {
       this.io.to(userRoom(otherId)).emit('chatMessage', {
-        message: payload?.message,
-        sender: payload?.sender,
-        symbol: payload?.symbol,
+        message: text,
+        sender: symbol,
+        symbol,
         gameId,
         playerId,
       });
@@ -715,22 +771,37 @@ class GameManager {
   // fixed turn schedule. Idempotent per turnIndex so re-emits (reconnects,
   // duplicate timers) can't make the AI speak twice in one turn.
   async handleAIReplyRequest(playerId, payload) {
-    const gameId = payload?.gameId || (await store.getPlayerGame(playerId));
-    if (!gameId) return;
-    const state = await store.loadGameState(gameId);
-    if (!state) return;
-
-    const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+    const ctx = await this._loadGameForPlayer(playerId, payload, 'requestAIReply');
+    if (!ctx) return;
+    const { gameId, state, otherId } = ctx;
     const isAIGame = Boolean(state.isAIGame) || otherId === AI_OPPONENT_ID;
     if (!isAIGame) return;
 
+    // The turn must be a real turn of the AI's — one reply per AI turn, no
+    // replies on the human's turns, nothing outside the schedule, and never
+    // "no turn at all" (which used to bypass both the replied-turns check
+    // and the claim below).
     const turnIndex = Number.isInteger(payload?.turnIndex) ? payload.turnIndex : null;
+    const aiSymbolForTurn = state.player1Id === AI_OPPONENT_ID ? state.player1Symbol : state.player2Symbol;
+    const turns = turnClock.schedule(state);
+    if (turnIndex === null || turnIndex < 0 || turnIndex >= turns.length || turns[turnIndex].symbol !== aiSymbolForTurn) {
+      console.warn(`[gameManager] requestAIReply rejected: userId=${playerId} gameId=${gameId} turnIndex=${turnIndex}`);
+      return;
+    }
+    const legacyClocks = state.legacyClocks === true || state.legacyClocks === 'true';
+    if (!legacyClocks) {
+      const cur = turnClock.currentTurn(state);
+      if (cur.over || turnIndex > cur.index + 1) {
+        console.warn(`[gameManager] requestAIReply too early/late: gameId=${gameId} turnIndex=${turnIndex} current=${cur.index}`);
+        return;
+      }
+    }
     const repliedTurns = Array.isArray(state.aiRepliedTurns) ? state.aiRepliedTurns : [];
-    if (turnIndex !== null && repliedTurns.includes(turnIndex)) return;
+    if (repliedTurns.includes(turnIndex)) return;
     // Claim this turn before any slow work so a duplicate request (reconnect,
     // second instance) can't make the AI answer twice — especially during the
     // human-paced delay below, when aiRepliedTurns isn't set yet.
-    if (turnIndex !== null) {
+    {
       const claimed = await store.tryClaimAIReply(gameId, turnIndex).catch(() => true);
       if (!claimed) return;
     }
@@ -780,13 +851,16 @@ class GameManager {
     const sendAILine = async (text, { markTurn }) => {
       const latest = await store.loadGameState(gameId);
       if (!latest) return false;
-      const latestLog = Array.isArray(latest.chatLog) ? latest.chatLog : chatLog;
       const latestReplied = Array.isArray(latest.aiRepliedTurns) ? latest.aiRepliedTurns : repliedTurns;
       if (turnIndex !== null && latestReplied.includes(turnIndex)) return false;
-      await store.patchGameState(gameId, {
-        chatLog: [...latestLog, { symbol: aiSymbol, text }],
-        aiRepliedTurns: markTurn && turnIndex !== null ? [...latestReplied, turnIndex] : latestReplied,
-      });
+      // Atomic append so a human buzzer-beater landing at the same instant
+      // isn't overwritten. The AI side is exempt from the per-turn cap (an
+      // aside + the real reply is two lines in one turn).
+      const appended = await store.appendChat(gameId, aiSymbol, text, { maxPerTurn: 50, maxTotal: MAX_CHAT_MESSAGES + 10 });
+      if (appended !== 'ok') return false;
+      if (markTurn && turnIndex !== null) {
+        await store.patchGameState(gameId, { aiRepliedTurns: [...latestReplied, turnIndex] });
+      }
       this.io.to(userRoom(playerId)).emit('chatMessage', {
         message: text,
         sender: aiSymbol,
@@ -862,11 +936,25 @@ class GameManager {
   // a client that was backgrounded/disconnected when it fired can rebuild
   // the exact same clock on reattach.
   async handleFinishTurn(playerId, payload) {
-    const gameId = await store.getPlayerGame(playerId);
-    if (!gameId) return;
-    if (payload?.gameId && payload.gameId !== gameId) return;
+    const ctx = await this._loadGameForPlayer(playerId, payload, 'finishTurn');
+    if (!ctx) return;
+    const { gameId, state, symbol } = ctx;
     const turnIndex = Number.isInteger(payload?.turnIndex) ? payload.turnIndex : null;
-    if (turnIndex === null || turnIndex < 0) return;
+    // You can only end YOUR OWN turn, and only the one that's running (a
+    // tap right at the boundary may name the turn that just ended).
+    const turns = turnClock.schedule(state);
+    if (turnIndex === null || turnIndex < 0 || turnIndex >= turns.length || turns[turnIndex].symbol !== symbol) {
+      console.warn(`[gameManager] finishTurn rejected: userId=${playerId} gameId=${gameId} turnIndex=${turnIndex} symbol=${symbol}`);
+      return;
+    }
+    const legacyClocks = state.legacyClocks === true || state.legacyClocks === 'true';
+    if (!legacyClocks) {
+      const cur = turnClock.currentTurn(state);
+      if (cur.over || Math.abs(turnIndex - cur.index) > 1) {
+        console.warn(`[gameManager] finishTurn out of window: gameId=${gameId} turnIndex=${turnIndex} current=${cur.index}`);
+        return;
+      }
+    }
     await this._recordFinishedTurn(gameId, turnIndex);
     this.io.to(gameRoom(gameId)).emit('turnFinished', { gameId, turnIndex, playerId });
   }
@@ -1040,7 +1128,14 @@ class GameManager {
     const judged = await getFinalJudgeResult(gameId).catch(() => null);
     const judging = !judged && (await isFinalJudgeInProgress(gameId));
     const elapsedMs = state && Number(state.startedAt) > 0 ? Date.now() - Number(state.startedAt) : 0;
-    const passed = message === PASS_LEAVE_REASON && elapsedMs >= MIN_PASS_ELAPSED_MS;
+    // A Pass is only believable once the debate has actually run out on the
+    // server's clock (regulation, and overtime if one was opened). Games
+    // with a pre-clock build keep the old wall-clock floor.
+    const legacyClocks = state && (state.legacyClocks === true || state.legacyClocks === 'true');
+    const debateOver = state
+      ? (legacyClocks ? elapsedMs >= MIN_PASS_ELAPSED_MS : turnClock.gameOver(state))
+      : false;
+    const passed = message === PASS_LEAVE_REASON && debateOver;
     if (judged || judging || passed) {
       console.log(
         `[gameManager] post-debate leave userId=${playerId} gameId=${gameId} ` +
@@ -1250,18 +1345,25 @@ class GameManager {
       console.error('[gameManager] forfeit (disconnect) failed:', err.message);
     }
 
-    const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
-    if (otherId) {
-      this.io.to(userRoom(otherId)).emit('opponentDisconnected', {
-        message: 'Player has disconnected',
-        gameId,
-        kind: 'disconnected'
-      });
-    }
-
     // Final verdict only — a tie still in overtime is a live debate, and
     // the grace-expired drop above was a forfeit.
     const judged = await getFinalJudgeResult(gameId).catch(() => null);
+
+    // Tell the other player — but clients treat `opponentDisconnected` as
+    // "leave the debate screen", so once the verdict is in (they're on their
+    // results card) send the gentle post-debate notice instead.
+    const otherId = state.player1Id === playerId ? state.player2Id : state.player1Id;
+    if (otherId) {
+      if (judged) {
+        this.io.to(userRoom(otherId)).emit('opponentSkipped', { message: 'Your opponent left', gameId });
+      } else {
+        this.io.to(userRoom(otherId)).emit('opponentDisconnected', {
+          message: 'Player has disconnected',
+          gameId,
+          kind: 'disconnected'
+        });
+      }
+    }
 
     // The dropped player is offline right now, so they can't receive any
     // of this. Leave them a notice so their next connection takes them
