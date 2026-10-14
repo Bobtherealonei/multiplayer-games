@@ -416,6 +416,58 @@ async function generateDebateReply({
   return philo ? '' : pickFallback();
 }
 
+// Canned one-liners for the side-select stand-in's single casual turn, used
+// when the model is unavailable. Deliberately content-free: the real
+// argument follows a few seconds later.
+const CASUAL_ASIDES = [
+  'ok that\'s actually a fair point, give me a sec',
+  'hmm hold on, let me think about that one',
+  'lol ok wait, I want to answer that properly',
+  'alright give me a second, typing',
+  'ok fair, one sec',
+  'hm. ok let me think',
+];
+
+function pickCasualAside() {
+  return CASUAL_ASIDES[Math.floor(Math.random() * CASUAL_ASIDES.length)];
+}
+
+/**
+ * The side-select stand-in's one casual line per debate: a short, texting-
+ * style reaction to what the human just said (no arguments, no facts — the
+ * real reply lands after a pause). Never throws; falls back to a canned line.
+ */
+async function generateCasualAside({ question, humanMessage, aiPosition }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return pickCasualAside();
+  try {
+    const text = await callOpenAI(apiKey, {
+      model: MODEL,
+      temperature: 1.0,
+      max_tokens: 30,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You are a regular person in a casual text debate on a phone. You are about to answer your opponent\'s last message, but first you send ONE quick casual line — the kind of thing people type while they think ("ok that\'s actually fair, hold on", "hmm wait let me think about that", "lol ok give me a sec").',
+            'Rules: 3 to 12 words. Lowercase texting style, light or no punctuation, no emojis, no hashtags. React to THEIR message or just stall — do NOT make any argument, claim, fact, or question about the topic. Do not mention being an AI. Output only the line.',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: `Debate statement: "${question || ''}"\nYour side: ${aiPosition || 'unspecified'}\nOpponent just said:\n${(humanMessage || '').slice(0, 600) || '(nothing yet)'}`,
+        },
+      ],
+    });
+    const line = (text || '').replace(/^["'“”]+|["'“”]+$/g, '').replace(/\s+/g, ' ').trim();
+    if (!line || line.length > 90 || line.split(/\s+/).length > 14) return pickCasualAside();
+    return line;
+  } catch (err) {
+    console.error(`[aiOpponent] casual aside failed: ${err.message}`);
+    return pickCasualAside();
+  }
+}
+
 async function callOpenAI(apiKey, request) {
   const resp = await fetch(OPENAI_URL, {
     method: 'POST',
@@ -449,4 +501,5 @@ module.exports = {
   getPhilosopherPersona,
   pickPhilosophyQuestion,
   generateDebateReply,
+  generateCasualAside,
 };

@@ -39,6 +39,7 @@ const {
   getPhilosopherPersona,
   pickPhilosophyQuestion,
   generateDebateReply,
+  generateCasualAside,
 } = require('./aiOpponent');
 const { pickNextQuestionForPair } = require('./questionPicker');
 
@@ -108,6 +109,42 @@ function pickHumanPacing(state) {
   return {
     delayMs: Math.max(0, Math.round(delaySec * 1000 - AI_REQUEST_LEAD_MS)),
     profile,
+  };
+}
+
+// Regulation is 8 alternating turns, P1 first (DebateTopicView.turnSchedule).
+const REGULATION_TURN_COUNT = 8;
+// Once per debate the stand-in sends a casual one-liner ("ok that's actually
+// fair, hold on") this many seconds into its turn, then goes quiet for at
+// least CASUAL_ASIDE_GAP_SECONDS before the real argument lands.
+const CASUAL_ASIDE_MIN_SECONDS = 5;
+const CASUAL_ASIDE_MAX_SECONDS = 12;
+const CASUAL_ASIDE_GAP_SECONDS = 10;
+
+/** Random turn index for the aside: one of the AI's turns except its first. */
+function pickCasualAsideTurn(aiSymbol) {
+  const aiTurns = [];
+  for (let i = 0; i < REGULATION_TURN_COUNT; i += 1) {
+    if ((i % 2 === 0 ? 'P1' : 'P2') === aiSymbol) aiTurns.push(i);
+  }
+  const candidates = aiTurns.slice(1);
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+/**
+ * Timing for an aside turn: when the one-liner goes out, and how the main
+ * reply's delay is pushed back so there is always a visible pause between
+ * the two (capped so the reply still lands with time on the clock).
+ */
+function pickAsidePacing(state, pacing) {
+  const turnSeconds = Number(state?.turnSeconds) > 0 ? Number(state.turnSeconds) : 60;
+  const asideSec = CASUAL_ASIDE_MIN_SECONDS + Math.random() * (CASUAL_ASIDE_MAX_SECONDS - CASUAL_ASIDE_MIN_SECONDS);
+  const asideDelayMs = Math.max(0, Math.round(asideSec * 1000 - AI_REQUEST_LEAD_MS));
+  const minMainMs = asideDelayMs + CASUAL_ASIDE_GAP_SECONDS * 1000;
+  const capMs = Math.max(minMainMs, (turnSeconds - 5) * 1000 - AI_REQUEST_LEAD_MS);
+  return {
+    asideDelayMs,
+    mainDelayMs: Math.min(capMs, Math.max(pacing.delayMs, minMainMs)),
   };
 }
 
@@ -248,7 +285,13 @@ class GameManager {
     // AI game that stands in for a human match: judged and paid under
     // human-game rules (no handicap, duration floor applies, counts as a
     // real-person result on the profile).
-    if (gameOptions.aiFallback) serialized.aiFallback = true;
+    if (gameOptions.aiFallback) {
+      serialized.aiFallback = true;
+      // Once per debate the stand-in drops a casual one-liner before its
+      // real reply (see handleAIReplyRequest). Pick which of its turns now —
+      // any but its opening one, which has nothing to react to.
+      serialized.aiCasualTurn = pickCasualAsideTurn(player1Id === AI_OPPONENT_ID ? 'P1' : 'P2');
+    }
     await store.saveGameState(gameId, serialized);
 
     // Ranked topic games: don't rematch this pair for a while. Custom /
@@ -282,6 +325,9 @@ class GameManager {
         }
       : {};
     const hiddenMeta = hiddenOpponent ? { hiddenOpponent: true } : {};
+    // Side-select stand-in: the client gives its turns the same thinking
+    // prefix a human gets, so it paces like the person it replaced.
+    const fallbackMeta = gameOptions.aiFallback ? { aiFallback: true } : {};
 
     // Server-measured ms since the game was created — the client anchors its
     // debate clock to this (skew-free), so backgrounding/reconnecting never
@@ -301,6 +347,7 @@ class GameManager {
         clockElapsedMs,
         ...aiMeta,
         ...hiddenMeta,
+        ...fallbackMeta,
       });
     }
     if (player2Id !== AI_OPPONENT_ID) {
@@ -315,6 +362,7 @@ class GameManager {
         question: game.question,
         clockElapsedMs,
         ...hiddenMeta,
+        ...fallbackMeta,
       });
     }
 
@@ -693,6 +741,12 @@ class GameManager {
     // flow keep their quick replies.
     const humanPaced = state.aiFallback === true || state.aiFallback === 'true';
     const pacing = humanPaced ? pickHumanPacing(state) : null;
+    // Its one casual turn: a quick one-liner first, a pause, then the reply.
+    const aside =
+      pacing && turnIndex !== null && Number(state.aiCasualTurn) === turnIndex
+        ? pickAsidePacing(state, pacing)
+        : null;
+    if (aside) pacing.delayMs = aside.mainDelayMs;
 
     const chatLog = state.chatLog || [];
     const aiSymbol = state.player1Id === AI_OPPONENT_ID ? state.player1Symbol : state.player2Symbol;
@@ -715,8 +769,33 @@ class GameManager {
 
     console.log(
       `[aiOpponent] gameId=${gameId} turn=${turnIndex ?? '?'} side=${aiPosition || '?'} ammoPts=${sideAmmo?.length ?? 0} questionId=${state.questionId || 'none'}` +
-        (pacing ? ` paced=${Math.round(pacing.delayMs / 1000)}s length=${pacing.profile}` : '')
+        (pacing ? ` paced=${Math.round(pacing.delayMs / 1000)}s length=${pacing.profile}` : '') +
+        (aside ? ` aside=${Math.round(aside.asideDelayMs / 1000)}s` : '')
     );
+
+    // Appends one AI line to the chat log and pushes it to the human. Re-reads
+    // the state first: after a wait the game may be gone (human quit) or have
+    // moved on, and we must never resurrect a finished game. Returns false if
+    // the line was not sent.
+    const sendAILine = async (text, { markTurn }) => {
+      const latest = await store.loadGameState(gameId);
+      if (!latest) return false;
+      const latestLog = Array.isArray(latest.chatLog) ? latest.chatLog : chatLog;
+      const latestReplied = Array.isArray(latest.aiRepliedTurns) ? latest.aiRepliedTurns : repliedTurns;
+      if (turnIndex !== null && latestReplied.includes(turnIndex)) return false;
+      await store.patchGameState(gameId, {
+        chatLog: [...latestLog, { symbol: aiSymbol, text }],
+        aiRepliedTurns: markTurn && turnIndex !== null ? [...latestReplied, turnIndex] : latestReplied,
+      });
+      this.io.to(userRoom(playerId)).emit('chatMessage', {
+        message: text,
+        sender: aiSymbol,
+        symbol: aiSymbol,
+        gameId,
+        playerId: AI_OPPONENT_ID,
+      });
+      return true;
+    };
 
     try {
       const generation = generateDebateReply({
@@ -731,6 +810,22 @@ class GameManager {
         ammo: sideAmmo,
         lengthProfile: pacing ? pacing.profile : 'quick',
       });
+
+      if (aside) {
+        // The one-liner goes out on its own clock while the real answer is
+        // still being generated; the main delay then continues from there.
+        const asideText = await Promise.all([
+          generateCasualAside({
+            question: state.question,
+            humanMessage: humanSinceAI.join('\n'),
+            aiPosition,
+          }).catch(() => ''),
+          sleepMs(aside.asideDelayMs),
+        ]).then(([text]) => text);
+        if (asideText && !(await sendAILine(asideText, { markTurn: false }))) return;
+        pacing.delayMs = Math.max(0, aside.mainDelayMs - aside.asideDelayMs);
+      }
+
       // Generate now, but hold the message until the human-like delay has
       // passed (whichever finishes later).
       if (pacing) {
@@ -742,26 +837,7 @@ class GameManager {
         return;
       }
 
-      // After the wait the game may be gone (human quit) or have moved on —
-      // re-read before writing so we never resurrect a finished game.
-      const latest = pacing ? await store.loadGameState(gameId) : state;
-      if (!latest) return;
-      const latestLog = Array.isArray(latest.chatLog) ? latest.chatLog : chatLog;
-      const latestReplied = Array.isArray(latest.aiRepliedTurns) ? latest.aiRepliedTurns : repliedTurns;
-      if (turnIndex !== null && latestReplied.includes(turnIndex)) return;
-
-      await store.patchGameState(gameId, {
-        chatLog: [...latestLog, { symbol: aiSymbol, text: reply }],
-        aiRepliedTurns: turnIndex !== null ? [...latestReplied, turnIndex] : latestReplied,
-      });
-
-      this.io.to(userRoom(playerId)).emit('chatMessage', {
-        message: reply,
-        sender: aiSymbol,
-        symbol: aiSymbol,
-        gameId,
-        playerId: AI_OPPONENT_ID,
-      });
+      if (!(await sendAILine(reply, { markTurn: true }))) return;
 
       // The AI is done as soon as it answers — auto-finish its turn so the
       // human doesn't sit through the rest of the AI's clock. Same event the
@@ -1295,6 +1371,7 @@ class GameManager {
             }
           : {}),
         ...(hidden ? { hiddenOpponent: true } : {}),
+        ...(state.aiFallback === true || state.aiFallback === 'true' ? { aiFallback: true } : {}),
         ...overtimeMeta,
       });
       socket.emit('gameState', {
