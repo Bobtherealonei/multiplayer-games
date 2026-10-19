@@ -40,19 +40,78 @@ const PHILOSOPHER_COMMON = [
   '- Never refuse a topic for being unfamiliar or anachronistic; a wise mind reasons about anything.',
   '- You may name the modern subject plainly, but interpret it with your own ideas and analogies.',
   '',
-  'HOW TO DEBATE:',
-  '- FIRST answer the OPPONENT\'s latest argument directly: name their specific point and say why it is wrong, incomplete, or outweighed.',
-  '- THEN add at most one new idea, analogy, or reason for your side of the statement.',
-  '- If the opponent has refuted one of your earlier points and you have no real answer, let it go. Never bring back a point they already answered unless you add something new.',
-  '- Stay on the exact debate statement. Do not wander to a new sub-topic unless the opponent did.',
-  '- Do not repeat an argument you already made (check the lines marked YOU in the transcript). Rewording the same idea still counts as repeating — bring a different reason, example, or consequence each time.',
-  '- If the opponent half-concedes ("it is a risk, but...", "true, yet..."), seize on the concession and press it rather than restating your own point.',
-  '- Do not open with agree-then-pivot filler ("Indeed, yet...", "Ah, but...", "True, however...", "Yes, but..."). Begin directly with your answer to their point, and vary how you begin.',
-  '',
   'LENGTH — VERY IMPORTANT:',
   '- Reply with 2 short sentences. Never more. This is a fast chat, not a lecture.',
   '- No lists. Never break character. Never mention being an AI, a model, or the modern date.',
 ].join('\n');
+
+// Shared by EVERY AI opponent (casual personas and philosophers alike). This
+// is the "actually listening" layer: it is about tracking the conversation
+// and sounding like a person, not about hitting harder. Difficulty is left
+// alone on purpose — the app wants a beatable, human-feeling opponent.
+const CONVERSATION_RULES = [
+  'HOW TO DEBATE (every reply, in this order):',
+  '1. FIRST answer the OPPONENT\'s latest message directly. Name their specific point and say why it is wrong, incomplete, or outweighed. If they gave an example or a number, deal with THAT example or number — not a generic version of it.',
+  '2. THEN add at most ONE new reason, example, or consequence for your side. One. Not a restatement of your thesis.',
+  '',
+  'KEEP TRACK OF THE THREAD:',
+  '- If the opponent misread the statement (e.g. "everyone" means every eligible voter, not literally anyone), fix that first in plain words — once.',
+  '- Refer back to earlier lines when it fits: "you said earlier...", "two messages ago you claimed...", "you never answered my point about...". People remember what was said; show that you do.',
+  '- If the opponent refuted one of your earlier points and you have no real answer, drop it. Never bring back a point they already answered unless you add something genuinely new.',
+  '- If the opponent half-concedes ("sure but...", "it is a risk, but...", "fine, but..."), call out the concession and press on it instead of restating your point.',
+  '- Stay on the exact debate statement. Do not wander to a new sub-topic unless the opponent did.',
+  '',
+  'NEVER REPEAT YOURSELF:',
+  '- Check every line marked YOU before writing. Do not reuse the same thesis sentence, the same key phrase, or the same two-part shape. Rewording the same idea still counts as repeating.',
+  '- Do NOT end every reply by restating your overall position ("mail voting removes barriers / honors reason"). You already said it once; the opponent heard you. Your last sentence should be a NEW specific point, a concrete example, a direct question to them, or a push on what they just said.',
+  '- Any signature phrase you have already used in this debate is now off-limits (e.g. if you said "clear and distinct proof" once, do not say it again).',
+  '- Vary the SHAPE of your replies across the debate: sometimes a pointed question, sometimes a short jab, sometimes "ok that part is true, but...", sometimes a concrete example. Never two replies in a row with the same structure.',
+  '- It is fine, and human, to admit when the opponent made a decent point ("fair, that one is a real concern") and then explain why it does not change your side. Never concede the statement itself.',
+  '- Do not open with agree-then-pivot filler ("yeah but", "ok but", "Indeed, yet", "Ah, but", "True, however"). Start straight in on their point, and start differently each time.',
+  '- Never begin two of your replies with the same word or phrase (that includes pet openers like "My friend", "You assume", "Your claim"). Look at how your YOU lines start and start this one differently.',
+].join('\n');
+
+// The model restates its thesis in fresh words every turn if left to its own
+// devices ("vary your replies" barely moves it). So the SERVER picks the
+// shape of each reply and states it as a format rule, which the model does
+// follow. Rotation starts at a question-dependent offset so repeat players
+// don't see the same order every game.
+const REPLY_SHAPES = {
+  example: 'SHAPE FOR THIS REPLY: answer their point, then give ONE concrete real-world example or fact (a place, a number, a case, a precedent) that undercuts it. Do NOT end with a general statement of your position.',
+  question: 'SHAPE FOR THIS REPLY: answer their point briefly, then END with one sharp, specific question they have to answer. The question is your last sentence. No summary of your side.',
+  concede: 'SHAPE FOR THIS REPLY: open by granting, in a few words, the part of their point that is actually true. Then show why it still does not support their side on THIS statement. No thesis restatement.',
+  callback: 'SHAPE FOR THIS REPLY: point to something they said EARLIER in this debate (quote it loosely: "earlier you said...") that contradicts or weakens what they just said, and press on that gap. Nothing else.',
+  jab: 'SHAPE FOR THIS REPLY: two short, plain sentences. First: what is wrong with their point. Second: what their claim would actually mean if it were true. Short words, no flourish, no summary of your side.',
+  close: 'SHAPE FOR THIS REPLY: this is your last message. Answer their final point, then give your bottom line in one plain sentence in your own words — like a person wrapping up, not a conclusion paragraph.',
+};
+const SHAPE_ROTATION = ['example', 'question', 'concede', 'callback', 'jab'];
+
+function pickReplyShape({ ownReplies, aiTurnsLeft, question, hasEarlierOpponentLines }) {
+  if (aiTurnsLeft === 0) return REPLY_SHAPES.close;
+  let seed = 0;
+  for (const ch of String(question || '')) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+  let shape = SHAPE_ROTATION[(seed + ownReplies) % SHAPE_ROTATION.length];
+  // A callback needs something to call back to.
+  if (shape === 'callback' && !hasEarlierOpponentLines) shape = 'example';
+  return REPLY_SHAPES[shape];
+}
+
+// Where we are in the debate changes how a person talks: early you set up
+// the disagreement, mid-way you dig into specifics, on your final turn you
+// wrap up ("bottom line..."), not open a new front.
+function turnContext({ turnIndex, totalTurns, aiTurnsLeft }) {
+  if (!Number.isInteger(turnIndex) || !Number.isInteger(totalTurns) || totalTurns <= 0) return '';
+  const human = Math.min(totalTurns, turnIndex + 1);
+  const parts = [`This is turn ${human} of ${totalTurns} in the debate.`];
+  if (aiTurnsLeft === 0) {
+    parts.push('This is your LAST message. Close it out: answer their final point and give your bottom line in your own words. Do not open a brand-new argument.');
+  } else if (aiTurnsLeft === 1) {
+    parts.push('You have one more message after this one, so make this reply count on their latest point.');
+  } else if (turnIndex <= 1) {
+    parts.push('Early in the debate: set up the disagreement clearly, you do not need to win it all at once.');
+  }
+  return parts.join(' ');
+}
 
 const PHILOSOPHERS = {
   socrates: {
@@ -61,7 +120,7 @@ const PHILOSOPHERS = {
     imageURL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Socrates_Louvre.jpg/440px-Socrates_Louvre.jpg',
     systemPrompt: [
       'You ARE Socrates of Athens, the classical Greek philosopher (c. 470–399 BC), debating in a live chat.',
-      'Speak and reason EXACTLY as Socrates would. Stay fully in character at all times.',
+      'Argue in Socrates’s voice and with Socrates’s ideas, but as Socrates would if he were texting a stranger today: natural, direct, no lecture. Do not force your signature vocabulary into every line.',
       'METHOD: use the Socratic method — argue by asking sharp, probing questions that expose contradictions. Profess your own ignorance ("I know that I know nothing"). Demand definitions of big words (justice, good, virtue). Use everyday analogies (craftsmen, doctors, sailors).',
       'IDEAS: virtue is knowledge; no one does wrong willingly; the care of the soul matters more than wealth; "the unexamined life is not worth living." Channel Plato\'s dialogues.',
       'STYLE: eloquent, plain, warm but relentless, with mild irony. Address your opponent as "my friend." Usually end on a pointed question.',
@@ -73,7 +132,7 @@ const PHILOSOPHERS = {
     imageURL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/fa/Plato_Silanion_Musei_Capitolini_MC1377.jpg/440px-Plato_Silanion_Musei_Capitolini_MC1377.jpg',
     systemPrompt: [
       'You ARE Plato of Athens (c. 428–348 BC), student of Socrates, founder of the Academy, debating in a live chat.',
-      'Speak and reason EXACTLY as Plato would. Stay fully in character.',
+      'Argue in Plato’s voice and with Plato’s ideas, but as Plato would if he were texting a stranger today: natural, direct, no lecture. Do not force your signature vocabulary into every line.',
       'METHOD: reason toward ideal forms behind appearances; distinguish mere opinion from true knowledge; use vivid analogies (the Cave, the divided line, the ship of state, the charioteer of the soul).',
       'IDEAS: the Theory of Forms (a perfect Justice, Beauty, Good beyond the physical); the tripartite soul (reason, spirit, appetite); rule by the wise (philosopher-kings); distrust of unchecked democracy and of poets who flatter the crowd.',
       'STYLE: elevated, confident, systematic. Appeal to what is eternal and ideal versus the shifting shadows most people mistake for reality.',
@@ -85,7 +144,7 @@ const PHILOSOPHERS = {
     imageURL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ae/Aristotle_Altemps_Inv8575.jpg/440px-Aristotle_Altemps_Inv8575.jpg',
     systemPrompt: [
       'You ARE Aristotle of Stagira (384–322 BC), student of Plato, tutor of Alexander, debating in a live chat.',
-      'Speak and reason EXACTLY as Aristotle would. Stay fully in character.',
+      'Argue in Aristotle’s voice and with Aristotle’s ideas, but as Aristotle would if he were texting a stranger today: natural, direct, no lecture. Do not force your signature vocabulary into every line.',
       'METHOD: analytical and empirical — observe particulars, classify, seek the cause and purpose (telos) of a thing. Argue by logic and the "golden mean" between extremes.',
       'IDEAS: virtue ethics (excellence as a habit, the mean between excess and deficiency); eudaimonia (flourishing) as the human end; humans as political animals; the four causes; practical wisdom (phronesis).',
       'STYLE: measured, precise, orderly. Distinguish senses of a word, then judge the case on reason and evidence rather than ideals.',
@@ -97,7 +156,7 @@ const PHILOSOPHERS = {
     imageURL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/98/Confucius_Tang_Dynasty.jpg/440px-Confucius_Tang_Dynasty.jpg',
     systemPrompt: [
       'You ARE Confucius (Kong Fuzi, 551–479 BC), the Chinese sage, debating in a live chat.',
-      'Speak and reason EXACTLY as Confucius would. Stay fully in character.',
+      'Argue in Confucius’s voice and with Confucius’s ideas, but as Confucius would if he were texting a stranger today: natural, direct, no lecture. Do not force your signature vocabulary into every line.',
       'METHOD: teach through concise moral maxims, appeals to virtue, and the example of the junzi (the exemplary person). Reference proper relationships, ritual, and harmony.',
       'IDEAS: ren (benevolence/humaneness), li (ritual propriety), filial piety, rectification of names, leading by moral example rather than force, social harmony over self-interest.',
       'STYLE: calm, aphoristic, gently authoritative — like a line from the Analects. Often frame duty in terms of family, ruler and subject, and cultivating oneself.',
@@ -109,7 +168,7 @@ const PHILOSOPHERS = {
     imageURL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/73/Frans_Hals_-_Portret_van_Ren%C3%A9_Descartes.jpg/440px-Frans_Hals_-_Portret_van_Ren%C3%A9_Descartes.jpg',
     systemPrompt: [
       'You ARE René Descartes (1596–1650), the French rationalist philosopher, debating in a live chat.',
-      'Speak and reason EXACTLY as Descartes would. Stay fully in character.',
+      'Argue in Descartes’s voice and with Descartes’s ideas, but as Descartes would if he were texting a stranger today: natural, direct, no lecture. Do not force your signature vocabulary into every line.',
       'METHOD: methodical doubt — strip away every assumption that can be doubted, then rebuild from what is certain and clear. Demand clear and distinct ideas before accepting a claim.',
       'IDEAS: "I think, therefore I am" (cogito ergo sum) as the one certainty; mind–body dualism; reason over the unreliable senses; building knowledge deductively from first principles.',
       'STYLE: precise, orderly, skeptical. Question what your opponent truly knows for certain versus what they merely assume.',
@@ -175,9 +234,30 @@ function pickFallback() {
  * reads as finished — but only when there's at least one complete sentence
  * to keep (casual chat replies legitimately skip ending punctuation).
  */
+// Sentence splitting that doesn't break on "U.S.", "e.g.", "Dr.", "3.5",
+// "vs." — a naive split on periods cut a reply at "many U." once.
+const PROTECTED_DOT = '\u2024'; // one-dot leader, restored afterwards
+function protectAbbreviations(text) {
+  return String(text)
+    // Acronyms with internal dots: U.S., U.K., D.C., a.m., p.m., e.g., i.e.
+    .replace(/\b(?:[A-Za-z]\.){2,}/g, (m) => m.replace(/\./g, PROTECTED_DOT))
+    // Titles and common abbreviations followed by a word.
+    .replace(/\b(Mr|Mrs|Ms|Dr|St|No|vs|etc|approx|Sen|Rep|Gov|Jr|Sr)\.(?=\s)/g, `$1${PROTECTED_DOT}`)
+    // Decimals: 3.5, 0.0025
+    .replace(/(\d)\.(\d)/g, `$1${PROTECTED_DOT}$2`);
+}
+function restoreAbbreviations(text) {
+  return String(text).split(PROTECTED_DOT).join('.');
+}
+function splitSentences(text) {
+  const protectedText = protectAbbreviations(text);
+  const parts = protectedText.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  return parts.map(restoreAbbreviations);
+}
+
 function dropTruncatedTail(text) {
   if (!text || typeof text !== 'string') return text;
-  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  const sentences = splitSentences(text);
   if (sentences.length < 2) return text;
   const last = sentences[sentences.length - 1].trim();
   if (/[.!?]$/.test(last)) return text;
@@ -218,7 +298,7 @@ function trimToHumanReply(text, { maxSentences = 2, maxChars = 220 } = {}) {
 
   if (!cleaned) return cleaned;
 
-  const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
+  const sentences = splitSentences(cleaned); if (sentences.length === 0) sentences.push(cleaned);
   cleaned = sentences.slice(0, maxSentences).join(' ').trim();
 
   // Over-length replies get cut at the last sentence boundary inside the cap
@@ -237,7 +317,7 @@ function trimToSentences(text, maxSentences = 2) {
   if (!text || typeof text !== 'string') return text;
   const cleaned = text.replace(/^["']|["']$/g, '').replace(/\s+/g, ' ').trim();
   if (!cleaned) return cleaned;
-  const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
+  const sentences = splitSentences(cleaned); if (sentences.length === 0) sentences.push(cleaned);
   return sentences.slice(0, maxSentences).join(' ').trim();
 }
 
@@ -288,6 +368,85 @@ function casualizeReply(text, { maxSentences = 2, maxChars = 220 } = {}) {
   return s.replace(/\s+/g, ' ').trim();
 }
 
+// ── Conversation tracking ───────────────────────────────────────────────
+
+const STOPWORDS = new Set('the a an and or but so of to in on at for with by from is are was were be been it its this that these those you your i my me we our they their them he she his her not no yes do does did have has had can could would should will just like than then there here what which who how why when very really also about into over more most some any all'.split(' '));
+
+function contentWords(text) {
+  return new Set(
+    String(text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s']/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !STOPWORDS.has(w))
+  );
+}
+
+/**
+ * How much a new reply re-treads something the AI already said. Returns the
+ * highest Jaccard overlap of content words against any earlier YOU line and
+ * that line. Cheap, no model call — meant to catch "same thesis, new words".
+ */
+function repetitionScore(reply, ownLines) {
+  const mine = contentWords(reply);
+  if (mine.size === 0) return { score: 0, line: null };
+  let best = { score: 0, line: null };
+  for (const line of ownLines) {
+    const theirs = contentWords(line);
+    if (theirs.size === 0) continue;
+    let inter = 0;
+    for (const w of mine) if (theirs.has(w)) inter += 1;
+    const score = inter / (mine.size + theirs.size - inter);
+    if (score > best.score) best = { score, line };
+  }
+  return best;
+}
+const REPEAT_THRESHOLD = 0.42;
+
+/**
+ * A tiny second model call that turns the transcript into an explicit
+ * ledger: what the opponent is claiming, what they got wrong about the
+ * statement, which of OUR points they answered, what they conceded. The
+ * reply prompt gets this as THREAD STATE so the model is reading a summary
+ * it cannot skim past, instead of re-deriving it from 6-8 raw lines (which
+ * is where it started repeating itself late in debates).
+ */
+async function summarizeThread(apiKey, { question, transcript, aiPosition }) {
+  const request = {
+    model: MODEL,
+    temperature: 0.2,
+    max_tokens: 220,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are taking notes on a live chat debate so that YOU (the side marked YOU) can reply well. Be terse and concrete. Plain text, exactly these five lines, each under 30 words:',
+          'OPPONENT CLAIMS: <their live claims, comma-separated, most recent first>',
+          'THEIR LATEST POINT: <the one thing their newest message is actually arguing>',
+          'MISREADING: <how they misread the statement, or "none">',
+          'MY POINTS ALREADY MADE: <short tags for each argument YOU made; mark ones they answered with (answered)>',
+          'CONCESSIONS: <anything either side admitted, or "none">',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: `Statement: ${question}\nYOU argue the ${aiPosition || 'assigned'} side.\n\nTranscript:\n${transcript}`,
+      },
+    ],
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const text = await callOpenAI(apiKey, request, controller.signal);
+    return text ? text.trim() : '';
+  } catch (err) {
+    console.warn(`[aiOpponent] thread summary skipped: ${err.message}`);
+    return '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function generateDebateReply({
   question,
   topicTitle,
@@ -299,6 +458,9 @@ async function generateDebateReply({
   ammo,
   aiSymbol,
   lengthProfile = 'quick',
+  turnIndex = null,
+  totalTurns = null,
+  aiTurnsLeft = null,
 }) {
   const apiKey = process.env.OPENAI_API_KEY;
   const philo = philosopher ? getPhilosopher(philosopher) : null;
@@ -308,6 +470,10 @@ async function generateDebateReply({
     // rather than break character with a casual one-liner.
     return philo ? '' : pickFallback();
   }
+
+  const ownLines = (chatLog || [])
+    .filter((e) => aiSymbol && e.symbol === aiSymbol && e.text)
+    .map((e) => e.text);
 
   // Label every line YOU / OPPONENT. Without this the model only saw raw
   // symbols ("P1:", "P2:") and had to guess which arguments were its own —
@@ -334,6 +500,8 @@ async function generateDebateReply({
       ].join('\n')
     : '';
 
+  const whereWeAre = turnContext({ turnIndex, totalTurns, aiTurnsLeft });
+
   const system = philo
     ? [
         philo.systemPrompt,
@@ -342,6 +510,9 @@ async function generateDebateReply({
         `The statement under debate: ${question}`,
         humanPosition ? `Your interlocutor is arguing the ${humanPosition} side.` : '',
         ammoBlock,
+        '',
+        CONVERSATION_RULES,
+        whereWeAre,
       ]
         .filter(Boolean)
         .join('\n')
@@ -353,16 +524,11 @@ async function generateDebateReply({
         humanPosition ? `They are on the ${humanPosition} side.` : '',
         ammoBlock,
         '',
-        'HOW TO DEBATE (in this order, every reply):',
-        '1. FIRST, directly answer the OPPONENT\'s latest argument. Name their specific point and say why it is wrong, incomplete, or outweighed. If they gave an example, deal with THAT example.',
-        '2. THEN add at most ONE new reason, example, or consequence that supports your side of the statement.',
-        'If the opponent has refuted one of your earlier points and you have no real answer, drop it. Never bring back a point they already answered unless you add new evidence.',
-        'Stay on the exact debate statement. Do not switch to a new sub-topic unless the opponent did. Follow the thread of the conversation, not a script.',
-        'Never repeat an argument YOU already made — check the lines marked YOU above. Saying the same idea in new words still counts as repeating. Every reply must bring a genuinely different angle: a different reason, a specific example, a consequence, or a comparison you have not used yet.',
-        'If the opponent half-concedes ("its a risk but...", "sure but...", "fine but..."), call out the concession and push on it instead of restating your point.',
+        CONVERSATION_RULES,
+        whereWeAre,
+        '',
         len.prompt,
         'Write like real chat: casual, plain words, imperfect grammar is fine. Contractions always (dont, cant, im, youre, its). Lowercase is fine.',
-        'Never open with "yeah but", "ok but", "i mean", "nah", "fair but" or any agree-then-pivot filler. Start straight in on the argument. Vary how you open.',
         'Skip fancy words (nevertheless, furthermore, consequently, utilize, individuals).',
         'Do NOT use perfect punctuation. Often skip periods. No semicolons or em dashes.',
         'No lists, no essay tone, no "As a supporter I believe". Just talk back.',
@@ -371,48 +537,85 @@ async function generateDebateReply({
         .filter(Boolean)
         .join('\n');
 
+  // Explicit ledger of the conversation once there is enough of it to lose
+  // track of (3+ lines). Runs in parallel with nothing — it has to land
+  // before the reply prompt is built — but the AI's turn is paced 20-40 s
+  // anyway, so the ~1 s is invisible.
+  const lineCount = (chatLog || []).length;
+  const threadState = transcript && lineCount >= 3
+    ? await summarizeThread(apiKey, { question, transcript, aiPosition })
+    : '';
+
   const theirLatest = (humanMessage || '').trim();
-  const userContent = transcript
+  const opponentLineCount = (chatLog || []).filter((e) => e.symbol !== aiSymbol && e.text).length;
+  const shape = pickReplyShape({
+    ownReplies: ownLines.length,
+    aiTurnsLeft,
+    question,
+    hasEarlierOpponentLines: opponentLineCount >= 2,
+  });
+  const buildUserContent = (avoidNote) => (transcript
     ? [
         `Debate so far (YOU = your messages, OPPONENT = theirs):\n${transcript}`,
+        threadState ? `\nTHREAD STATE (your own notes — rely on these):\n${threadState}` : '',
         theirLatest
           ? `\nThe opponent's message(s) since you last spoke:\n"${theirLatest}"`
           : '\nThe opponent said nothing since you last spoke.',
-        `\nIt's your turn. Answer their latest point head-on first, then push your ${aiPosition || 'own'} case with ONE new argument about the statement itself (${len.hint}). Do not repeat anything from your YOU lines.`,
-      ].join('\n')
+        `\nIt's your turn (${len.hint}). Do not repeat anything from your YOU lines.`,
+        shape,
+        avoidNote ? `\n${avoidNote}` : '',
+      ].filter(Boolean).join('\n')
     : philo
     ? `Open the debate on this modern statement in 2 sentences, in your own voice: "${question}"`
-    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the statement (${len.hint}).`;
+    : `It's your turn and the chat is empty so far — open the debate with a strong ${aiPosition || ''} argument about the statement (${len.hint}).`);
 
-  const request = {
+  const makeRequest = (avoidNote) => ({
     model: MODEL,
-    temperature: philo ? 0.8 : 0.8,
+    temperature: 0.85,
     // Generous headroom on purpose: reply LENGTH is controlled by the
     // prompt + the sentence trim below. A tight cap here made OpenAI
     // hard-truncate replies mid-sentence (finish_reason 'length').
     max_tokens: philo ? 220 : len.maxTokens,
     messages: [
       { role: 'system', content: system },
-      { role: 'user', content: userContent },
+      { role: 'user', content: buildUserContent(avoidNote) },
     ],
-  };
+  });
 
-  // One retry before the fallback: a transient 429/5xx should not turn a
-  // debate turn into a canned line.
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  const finish = (text) => (philo
+    ? trimToSentences(text, 2)
+    : casualizeReply(text, { maxSentences: len.sentences, maxChars: len.maxChars }));
+
+  // Up to three calls: transient 429/5xx get one retry, and a reply that
+  // re-treads an earlier YOU line gets ONE regeneration with the offending
+  // line quoted back. If the second try still repeats, we ship it rather
+  // than go silent — a slightly repetitive opponent beats a missing turn.
+  let avoidNote = '';
+  let repeatRetried = false;
+  let lastGood = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const text = await callOpenAI(apiKey, request);
+      const text = await callOpenAI(apiKey, makeRequest(avoidNote));
       if (!text) continue;
-      // Philosophers keep their eloquent voice — don't casualize them, but hard
-      // cap at 2 sentences so replies stay chat-sized.
-      if (philo) return trimToSentences(text, 2);
-      const casual = casualizeReply(text, { maxSentences: len.sentences, maxChars: len.maxChars });
-      if (casual) return casual;
+      const out = finish(text);
+      if (!out) continue;
+      lastGood = out;
+      const rep = repetitionScore(out, ownLines);
+      if (ownLines.length) console.log(`[aiOpponent] overlap with own earlier lines: ${rep.score.toFixed(2)}`);
+      if (rep.score >= REPEAT_THRESHOLD && !repeatRetried) {
+        repeatRetried = true;
+        console.log(`[aiOpponent] reply repeats an earlier line (overlap ${rep.score.toFixed(2)}) — regenerating once`);
+        avoidNote = `Your draft repeated something you already said: "${rep.line}". Do NOT make that point again in any form. Answer their latest message from a different angle, in a different sentence shape.`;
+        continue;
+      }
+      return out;
     } catch (err) {
       console.error(`[aiOpponent] attempt ${attempt} failed: ${err.message}`);
+      if (attempt >= 2 && lastGood) return lastGood;
     }
   }
-  console.error('[aiOpponent] both attempts failed — using neutral fallback');
+  if (lastGood) return lastGood;
+  console.error('[aiOpponent] all attempts failed — using neutral fallback');
   return philo ? '' : pickFallback();
 }
 
@@ -468,7 +671,7 @@ async function generateCasualAside({ question, humanMessage, aiPosition }) {
   }
 }
 
-async function callOpenAI(apiKey, request) {
+async function callOpenAI(apiKey, request, signal) {
   const resp = await fetch(OPENAI_URL, {
     method: 'POST',
     headers: {
@@ -476,6 +679,7 @@ async function callOpenAI(apiKey, request) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(request),
+    signal,
   });
 
   if (!resp.ok) {

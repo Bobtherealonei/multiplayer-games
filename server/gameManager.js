@@ -883,6 +883,11 @@ class GameManager {
         philosopher: state.philosopher || null,
         ammo: sideAmmo,
         lengthProfile: pacing ? pacing.profile : 'quick',
+        // Where we are in the debate, so the AI opens / digs in / wraps up
+        // like a person would instead of treating every turn the same.
+        turnIndex,
+        totalTurns: turns.length,
+        aiTurnsLeft: turns.filter((t) => t.index > turnIndex && t.symbol === aiSymbolForTurn).length,
       });
 
       if (aside) {
