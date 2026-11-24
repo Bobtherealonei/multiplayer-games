@@ -92,6 +92,75 @@ function nextWeeklyResetMs(date = new Date()) {
   return nextWall - offset;
 }
 
+// ── Explicit-timezone helpers ──────────────────────────────────────────────
+// The daily topic rolls over in its own configurable timezone (US Central by
+// default), independent of SHOP_TIMEZONE above. These take the zone as an
+// argument and leave the shop/reward helpers untouched.
+
+function isValidTimeZone(timeZone) {
+  if (typeof timeZone !== 'string' || !timeZone) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Wall-clock fields of `date` in `timeZone`.
+function wallClockInZone(timeZone, date) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  const p = {};
+  for (const part of dtf.formatToParts(date)) p[part.type] = part.value;
+  return {
+    year: Number(p.year),
+    month: Number(p.month),
+    day: Number(p.day),
+    hour: Number(p.hour === '24' ? '0' : p.hour),
+    minute: Number(p.minute),
+    second: Number(p.second)
+  };
+}
+
+function offsetMsInZone(timeZone, date) {
+  const w = wallClockInZone(timeZone, date);
+  const asUTC = Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second);
+  // Drop sub-second noise so the offset is a whole number of seconds.
+  return asUTC - Math.floor(date.getTime() / 1000) * 1000;
+}
+
+// "YYYY-MM-DD" for `date` in `timeZone`.
+function dayKeyInZone(timeZone, date = new Date()) {
+  const w = wallClockInZone(timeZone, date);
+  return `${w.year}-${String(w.month).padStart(2, '0')}-${String(w.day).padStart(2, '0')}`;
+}
+
+// Epoch ms of the next local midnight in `timeZone`. Re-checks the offset at
+// the answer so the two days a year the clocks change still land on midnight.
+function nextMidnightMsInZone(timeZone, date = new Date()) {
+  const offset = offsetMsInZone(timeZone, date);
+  const wall = new Date(date.getTime() + offset);
+  const nextWall = Date.UTC(
+    wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate() + 1, 0, 0, 0
+  );
+  let result = nextWall - offset;
+  const offsetThen = offsetMsInZone(timeZone, new Date(result));
+  if (offsetThen !== offset) result = nextWall - offsetThen;
+  return result;
+}
+
+// Calendar day before/after a "YYYY-MM-DD" key (pure date math, no timezone).
+function shiftDayKey(key, days) {
+  const [y, m, d] = String(key).split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + days));
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+}
+
 module.exports = {
   SHOP_TIMEZONE,
   zonedParts,
@@ -99,5 +168,9 @@ module.exports = {
   weekKey,
   zoneOffsetMs,
   nextDailyResetMs,
-  nextWeeklyResetMs
+  nextWeeklyResetMs,
+  isValidTimeZone,
+  dayKeyInZone,
+  nextMidnightMsInZone,
+  shiftDayKey
 };

@@ -26,6 +26,8 @@ const rewardsRoute = require('./rewards');
 const shopRoute = require('./shop');
 const shopRotation = require('./shopRotation');
 const leaderboardRoute = require('./leaderboard');
+const dailyTopic = require('./dailyTopic');
+const topicChat = require('./topicChat');
 const { getAuth } = require('./firestoreClient');
 
 const app = express();
@@ -68,7 +70,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'secure-1';
+const SERVER_VERSION = 'social-2';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -130,6 +132,13 @@ io.use(async (socket, next) => {
 io.on('connection', async (socket) => {
   const userId = socket.data.uid;
   socket.userId = userId;
+
+  // Today tab: daily topic state + vote (dailyTopicState / dailyTopicVote).
+  // Registered before the awaits below because the app asks for the topic
+  // the instant it connects; a listener added later would miss that request.
+  dailyTopic.registerHandlers(io, socket, userId);
+  // Live chat under the daily topic (topicChat* events, mute list).
+  topicChat.registerHandlers(io, socket, userId);
 
   // Record what this build supports (see gameStore.setClientCaps). Older
   // apps send neither field.
