@@ -1,6 +1,6 @@
-// socialConfig.js — tunable thresholds for the social features (daily topic
-// vote and its live chat now; challenges and takes add their own sections
-// later).
+// socialConfig.js — tunable limits for the social features (posts,
+// comments, challenges, one-on-one debates, the daily live debate, direct
+// messages).
 //
 // Lives in Firestore `siteSettings/social` so every number can be changed
 // without an app or server release. Same pattern as experiments.js: cached
@@ -10,27 +10,41 @@
 //   siteSettings/social
 //     dailyTopic: {
 //       timezone:             IANA zone the topic day rolls over in
-//       maxVoteChanges:       times a user may change their vote per topic
-//       voteCooldownMs:       minimum gap between one user's vote requests
 //       fallbackLookbackDays: window used to find the most-debated topic
-//       countsBroadcastMs:    how often live counts are pushed to voters
+//                             when no topic was scheduled for the day
 //     }
-//     chat: {
-//       maxMessageLength:      server cap on one message, in characters
-//       historyPageSize:       messages per page (first load and each older page)
-//       slowModeSmallSeconds:  gap between one user's messages in a small room
-//       slowModeMediumPeople:  people in the room at which the medium gap starts
-//       slowModeMediumSeconds: gap in a medium room
-//       slowModeLargePeople:   people in the room at which the large gap starts
-//       slowModeLargeSeconds:  gap in a large room
-//       duplicateHistory:      how many of a user's last messages a new one is compared to
-//       duplicateSimilarity:   0.5–1; how alike two messages must be to count as a repeat
-//       linkMinAccountAgeDays: accounts younger than this can't post links
-//       reportThreshold:       distinct reporters that mute an author in the room
-//       reportWindowMinutes:   window those reports must fall within
-//       reportsPerUserLimit:   reports one user may file per reportWindowMinutes
-//       presenceBroadcastMs:   how often the "people here now" count is pushed
-//       filterAllowWords:      words the content filter should let through
+//     content: {
+//       maxPostLength, maxCommentLength, maxBioLength, maxNameLength,
+//       maxMessageLength:     character caps (direct messages for the last)
+//       feedPageSize:         posts per page in both feeds and on profiles
+//       commentsPageSize:     top-level comments per page
+//       forYouWindow:         newest posts ranked for the For you tab
+//       forYouHalfLifeHours:  how fast a post's score fades with age
+//       postCooldownSeconds, commentCooldownSeconds, messageCooldownSeconds:
+//                             minimum gap between one user's posts / comments /
+//                             direct messages
+//       filterAllowWords:     words the content filter should let through
+//     }
+//     live: {
+//       messageCooldownSeconds: spam guard, gap between one user's messages
+//       maxMessageLength:       characters per message
+//       historyPageSize:        messages per page
+//       sideCooldownMs:         minimum gap between one user's side changes
+//       repeatMemory:           how many of a user's messages today are
+//                               remembered to refuse an identical one
+//     }
+//     challenge: {
+//       expiryHours:  how long a request waits for an answer
+//       maxPerHour:   requests one user may send per hour
+//       quoteLength:  characters of the post / comment quoted on the card
+//       maxClaimLength: characters of a claim written from a profile
+//     }
+//     debate: {
+//       rounds:                  rounds per debate (two turns each)
+//       turnSeconds:             time a debater has for their turn
+//       maxTurnLength:           characters per turn
+//       maxAudienceLength:       characters per audience-chat message
+//       audienceCooldownSeconds: gap between one spectator's messages
 //     }
 
 const { getDb } = require('./firestoreClient');
@@ -44,27 +58,42 @@ const CACHE_MS = 30 * 1000;
 const SCHEMA = {
   dailyTopic: {
     timezone: { type: 'timezone', default: 'America/Chicago' },
-    maxVoteChanges: { type: 'int', default: 3, range: [0, 20] },
-    voteCooldownMs: { type: 'number', default: 1000, range: [0, 60 * 1000] },
-    fallbackLookbackDays: { type: 'int', default: 7, range: [1, 60] },
-    countsBroadcastMs: { type: 'number', default: 500, range: [100, 10 * 1000] }
+    fallbackLookbackDays: { type: 'int', default: 7, range: [1, 60] }
   },
-  chat: {
-    maxMessageLength: { type: 'int', default: 5000, range: [1, 20000] },
-    historyPageSize: { type: 'int', default: 50, range: [10, 200] },
-    slowModeSmallSeconds: { type: 'number', default: 3, range: [0, 600] },
-    slowModeMediumPeople: { type: 'int', default: 100, range: [1, 10000000] },
-    slowModeMediumSeconds: { type: 'number', default: 10, range: [0, 600] },
-    slowModeLargePeople: { type: 'int', default: 1000, range: [1, 10000000] },
-    slowModeLargeSeconds: { type: 'number', default: 30, range: [0, 600] },
-    duplicateHistory: { type: 'int', default: 3, range: [0, 20] },
-    duplicateSimilarity: { type: 'number', default: 0.85, range: [0.5, 1] },
-    linkMinAccountAgeDays: { type: 'number', default: 7, range: [0, 365] },
-    reportThreshold: { type: 'int', default: 5, range: [1, 1000] },
-    reportWindowMinutes: { type: 'number', default: 10, range: [1, 24 * 60] },
-    reportsPerUserLimit: { type: 'int', default: 10, range: [1, 1000] },
-    presenceBroadcastMs: { type: 'number', default: 2000, range: [250, 60 * 1000] },
+  content: {
+    maxPostLength: { type: 'int', default: 500, range: [1, 5000] },
+    maxCommentLength: { type: 'int', default: 500, range: [1, 5000] },
+    maxBioLength: { type: 'int', default: 160, range: [0, 1000] },
+    maxNameLength: { type: 'int', default: 40, range: [1, 100] },
+    maxMessageLength: { type: 'int', default: 2000, range: [1, 10000] },
+    feedPageSize: { type: 'int', default: 20, range: [5, 50] },
+    commentsPageSize: { type: 'int', default: 20, range: [5, 50] },
+    forYouWindow: { type: 'int', default: 300, range: [20, 1000] },
+    forYouHalfLifeHours: { type: 'number', default: 12, range: [0.5, 24 * 14] },
+    postCooldownSeconds: { type: 'number', default: 5, range: [0, 600] },
+    commentCooldownSeconds: { type: 'number', default: 3, range: [0, 600] },
+    messageCooldownSeconds: { type: 'number', default: 0.5, range: [0, 60] },
     filterAllowWords: { type: 'words', default: [] }
+  },
+  live: {
+    messageCooldownSeconds: { type: 'number', default: 10, range: [0, 600] },
+    maxMessageLength: { type: 'int', default: 500, range: [1, 5000] },
+    historyPageSize: { type: 'int', default: 50, range: [10, 200] },
+    sideCooldownMs: { type: 'number', default: 1000, range: [0, 60 * 1000] },
+    repeatMemory: { type: 'int', default: 200, range: [1, 2000] }
+  },
+  challenge: {
+    expiryHours: { type: 'number', default: 24, range: [0.01, 24 * 14] },
+    maxPerHour: { type: 'int', default: 20, range: [1, 1000] },
+    quoteLength: { type: 'int', default: 280, range: [20, 1000] },
+    maxClaimLength: { type: 'int', default: 200, range: [10, 1000] }
+  },
+  debate: {
+    rounds: { type: 'int', default: 3, range: [1, 10] },
+    turnSeconds: { type: 'number', default: 120, range: [1, 3600] },
+    maxTurnLength: { type: 'int', default: 500, range: [1, 5000] },
+    maxAudienceLength: { type: 'int', default: 300, range: [1, 2000] },
+    audienceCooldownSeconds: { type: 'number', default: 2, range: [0, 600] }
   }
 };
 
@@ -107,8 +136,10 @@ function normalize(raw) {
 const DEFAULTS = Object.freeze(normalize(null));
 
 let cache = { at: 0, data: normalize(null) };
+let override = null;
 
 async function loadSocialConfig() {
+  if (override) return override;
   if (Date.now() - cache.at < CACHE_MS) return cache.data;
   const db = getDb();
   if (!db) return cache.data;
@@ -124,6 +155,13 @@ async function loadSocialConfig() {
 
 function _resetCacheForTests() {
   cache = { at: 0, data: normalize(null) };
+  override = null;
 }
 
-module.exports = { loadSocialConfig, normalize, DEFAULTS, _resetCacheForTests };
+// Tests pin the config (for example a 2-second turn) instead of writing to
+// the shared settings doc.
+function _setForTests(raw) {
+  override = raw ? normalize(raw) : null;
+}
+
+module.exports = { loadSocialConfig, normalize, DEFAULTS, _resetCacheForTests, _setForTests };

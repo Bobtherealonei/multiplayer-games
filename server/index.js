@@ -26,8 +26,7 @@ const rewardsRoute = require('./rewards');
 const shopRoute = require('./shop');
 const shopRotation = require('./shopRotation');
 const leaderboardRoute = require('./leaderboard');
-const dailyTopic = require('./dailyTopic');
-const topicChat = require('./topicChat');
+const social = require('./social');
 const { getAuth } = require('./firestoreClient');
 
 const app = express();
@@ -70,7 +69,7 @@ const matchmaking = new Matchmaking(gameManager, io, lobbyManager);
 lobbyManager.matchmaking = matchmaking;
 
 // Bump this on every deploy-relevant change so `/` confirms what Render runs.
-const SERVER_VERSION = 'social-2';
+const SERVER_VERSION = 'social-3';
 
 // Health check (also used by Render's healthcheck pings).
 app.get('/', (req, res) => {
@@ -114,6 +113,8 @@ io.use(async (socket, next) => {
       }
       socket.data.uid = decoded.uid;
       socket.data.authenticated = true;
+      socket.data.email = typeof decoded.email === 'string' ? decoded.email : null;
+      socket.data.emailVerified = decoded.email_verified === true;
       return next();
     } catch (err) {
       const expired = err && err.code === 'auth/id-token-expired';
@@ -133,12 +134,11 @@ io.on('connection', async (socket) => {
   const userId = socket.data.uid;
   socket.userId = userId;
 
-  // Today tab: daily topic state + vote (dailyTopicState / dailyTopicVote).
-  // Registered before the awaits below because the app asks for the topic
+  // Social features (profiles, feed, comments, challenges, one-on-one
+  // debates, the daily live debate, messages, notifications — see social/).
+  // Registered before the awaits below because the app asks for its session
   // the instant it connects; a listener added later would miss that request.
-  dailyTopic.registerHandlers(io, socket, userId);
-  // Live chat under the daily topic (topicChat* events, mute list).
-  topicChat.registerHandlers(io, socket, userId);
+  social.register(io, socket, userId);
 
   // Record what this build supports (see gameStore.setClientCaps). Older
   // apps send neither field.
@@ -394,6 +394,11 @@ io.on('connection', async (socket) => {
     }
   });
 });
+
+// Background work for the social features: the one-on-one debate turn
+// clock, challenge expiry and the midnight topic change. Every instance
+// runs it; Redis locks keep each step from happening twice.
+social.start(io);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
